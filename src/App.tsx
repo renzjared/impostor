@@ -87,6 +87,7 @@ function useGameAudio() {
   const [musicEnabled, setMusicEnabled] = useState(false);
   const [effectsEnabled, setEffectsEnabled] = useState(false);
   const contextRef = useRef<AudioContext | null>(null);
+  const musicRef = useRef<HTMLAudioElement | null>(null);
 
   const getContext = useCallback(() => {
     const Context = window.AudioContext;
@@ -148,29 +149,27 @@ function useGameAudio() {
     notes[kind]?.forEach((frequency, index) => playNote(frequency, now + index * 0.09, kind === "elimination" ? 0.45 : 0.23, 0.055, "triangle"));
   }, [effectsEnabled, getContext, playNote]);
 
-  useEffect(() => {
-    if (!musicEnabled) return;
-    const context = getContext();
-    if (!context) return;
-    const melody = [659.25, 783.99, 987.77, 783.99, 698.46, 880, 1046.5, 880];
-    const bass = [130.81, 164.81, 196, 164.81, 146.83, 174.61, 220, 174.61];
-    let step = 0;
-    const timer = window.setInterval(() => {
-      const start = context.currentTime;
-      playNote(bass[step % bass.length]!, start, 0.32, 0.016, "triangle");
-      playNote(melody[step % melody.length]!, start + 0.035, 0.2, 0.014, "triangle");
-      playNote(melody[(step + 2) % melody.length]!, start + 0.22, 0.16, 0.009, "sine");
-      step++;
-    }, 390);
-    return () => window.clearInterval(timer);
-  }, [musicEnabled, getContext, playNote]);
+  useEffect(() => () => {
+    musicRef.current?.pause();
+    musicRef.current = null;
+  }, []);
 
   const toggleMusic = () => {
-    if (!musicEnabled) {
-      const context = getContext();
-      if (!context) return false;
+    if (musicEnabled) {
+      musicRef.current?.pause();
+      setMusicEnabled(false);
+      return true;
     }
-    setMusicEnabled((value) => !value);
+
+    const music = musicRef.current || new Audio(`${import.meta.env.BASE_URL}background.mp3`);
+    music.loop = true;
+    music.volume = 0.3;
+    musicRef.current = music;
+    setMusicEnabled(true);
+    void music.play().catch((error: unknown) => {
+      if (musicRef.current === music) setMusicEnabled(false);
+      console.error("Could not play background music.", error);
+    });
     return true;
   };
   const toggleEffects = () => {
