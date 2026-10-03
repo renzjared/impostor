@@ -642,24 +642,25 @@ function App() {
     }
   };
 
-  const castVote = async (choice: string, requestedVoterId?: string) => {
-    if (!room) return;
+  const castVote = async (choice: string, requestedVoterId?: string): Promise<boolean> => {
+    if (!room || room.status !== "voting") return false;
     const voterId = room.mode === "personal-devices" ? userId : (requestedVoterId || room.players.find((player) => player.alive && !room.votes[player.id])?.id || userId);
     audio.cue("vote");
     if (room.mode === "personal-devices" && supabase) {
       const { data, error } = await supabase.rpc("cast_lobby_vote", { p_lobby_id: room.id, p_choice: choice });
       if (error || !data) {
         notify(`Could not submit your vote: ${error?.message || "No vote result returned."}`);
-        return;
+        return false;
       }
       const row = Array.isArray(data) ? data[0] : data;
       setRoom({ ...(row.state as GameRoom), id: row.id, code: row.code, name: row.name });
-      return;
+      return true;
     }
     const votes = { ...room.votes, [voterId]: choice };
     const nextRoom = { ...room, votes };
     await updateRoom(nextRoom);
     if (Object.keys(votes).length >= room.players.filter((player) => player.alive).length) await resolveVote(nextRoom);
+    return true;
   };
 
   const resolveVote = async (current = room, alreadyLocked = false) => {
@@ -669,7 +670,15 @@ function App() {
       resolvingVoteRef.current = true;
       const { data, error } = await supabase.rpc("resolve_lobby_vote", { p_lobby_id: current.id });
       if (error || !data) {
-        notify(`Could not resolve this vote: ${error?.message || "No result returned."}`);
+        const { data: latest, error: refreshError } = await supabase.from("lobbies")
+          .select("id, code, name, state, status").eq("id", current.id).maybeSingle();
+        if (!refreshError && latest && latest.status !== "voting") {
+          setRoom({ ...(latest.state as GameRoom), id: latest.id, code: latest.code, name: latest.name });
+          setScreen("game");
+          resolvingVoteRef.current = false;
+          return;
+        }
+        notify(`Could not resolve this vote: ${error?.message || "No result returned."}${refreshError ? ` Could not refresh the lobby: ${refreshError.message}` : ""}`);
         resolvingVoteRef.current = false;
         return;
       }
@@ -836,7 +845,7 @@ function App() {
           room={room} userId={userId} voterId={room.mode === "personal-devices" ? userId : (room.players.find((player) => player.alive && !room.votes[player.id])?.id || userId)} online={room.mode === "personal-devices"} countdown={countdown} reveal={reveal} setReveal={setReveal}
           passTurnReady={passTurnReady} onPassTurnReady={() => setPassTurnReady(true)} onRematch={() => void startRematch()} onRevealRole={() => audio.cue("reveal")}
           clueInput={clueInput} setClueInput={setClueInput} onSubmit={() => void submitClue()}
-          onVote={(id, voterId) => void castVote(id, voterId)} onNext={() => void nextRound()} canAdvance={!supabase || room.hostId === userId} onHome={leaveRoom}
+          onVote={castVote} onNext={() => void nextRound()} canAdvance={!supabase || room.hostId === userId} onHome={leaveRoom}
           onGuess={(guess, guesserId) => {
             if (!room || !room.impostors.includes(supabase ? userId : guesserId)) return;
             const correct = guess.trim().toLowerCase() === room.word?.toLowerCase();
@@ -1026,7 +1035,7 @@ function Game({ room, userId, voterId, online, countdown, reveal, setReveal, pas
   room: GameRoom; userId: string; voterId: string; online: boolean; countdown: number; reveal: boolean; setReveal: (reveal: boolean) => void;
   passTurnReady: boolean; onPassTurnReady: () => void; onRematch: () => void; onRevealRole: () => void; canAdvance: boolean;
   clueInput: string; setClueInput: (clue: string) => void;
-  onSubmit: () => void; onVote: (id: string, voterId: string) => void; onNext: () => void; onHome: () => void; onGuess: (guess: string, guesserId: string) => void;
+  onSubmit: () => void; onVote: (id: string, voterId: string) => Promise<boolean>; onNext: () => void; onHome: () => void; onGuess: (guess: string, guesserId: string) => void;
 }) {
   const currentId = room.turnOrder[room.turnIndex];
   const currentPlayer = room.players.find((player) => player.id === currentId);
@@ -1038,12 +1047,14 @@ function Game({ room, userId, voterId, online, countdown, reveal, setReveal, pas
   const [showGuess, setShowGuess] = useState(false);
   const [readyTurnKey, setReadyTurnKey] = useState("");
   const [localVoterId, setLocalVoterId] = useState(voterId);
+  const [onlineVote, setOnlineVote] = useState<string>();
   const [roleIntroVisible, setRoleIntroVisible] = useState(false);
   const roleIntroPlayedRef = useRef(false);
   const [guesserId, setGuesserId] = useState(room.impostors[0] || userId);
   const turnKey = `${room.round}:${room.turnIndex}`;
   const passRoleReady = readyTurnKey === turnKey;
   const activeVoterId = online ? voterId : localVoterId;
+  const selectedVote = online ? onlineVote : room.votes[activeVoterId];
   const voted = Boolean(room.votes[activeVoterId]);
   const votedCount = Object.keys(room.votes).length;
   const voter = room.players.find((player) => player.id === activeVoterId);
@@ -1068,6 +1079,9 @@ function Game({ room, userId, voterId, online, countdown, reveal, setReveal, pas
     if (room.status === "voting" && !online) setLocalVoterId(voterId);
   }, [room.status, room.round, online, voterId]);
   useEffect(() => {
+    setOnlineVote(undefined);
+  }, [room.id, room.round]);
+  useEffect(() => {
     if (!reveal) return;
     const timer = window.setTimeout(() => setReveal(false), 12_000);
     return () => window.clearTimeout(timer);
@@ -1082,8 +1096,10 @@ function Game({ room, userId, voterId, online, countdown, reveal, setReveal, pas
   const votesComplete = votedCount >= room.players.filter((player) => player.alive).length;
   const canChangeVote = canVote && !votesComplete && countdown > 0;
   const remainingImpostorCount = room.remainingImpostors ?? room.impostors.filter((id) => room.players.some((player) => player.id === id && player.alive)).length;
-  const submitVote = (choice: string) => {
-    onVote(choice, activeVoterId);
+  const submitVote = async (choice: string) => {
+    const accepted = await onVote(choice, activeVoterId);
+    if (!accepted) return;
+    if (online) setOnlineVote(choice);
     if (!online) {
       const nextVoter = room.players.find((player) => player.alive && player.id !== activeVoterId && !room.votes[player.id]);
       if (nextVoter) setLocalVoterId(nextVoter.id);
@@ -1104,11 +1120,11 @@ function Game({ room, userId, voterId, online, countdown, reveal, setReveal, pas
       <div className="turn-order-card"><div className="clue-history-head">TURN ORDER <span>SHUFFLED EACH ROUND</span></div>{room.turnOrder.map((id, index) => { const player = room.players.find((entry) => entry.id === id); return <div key={id} className={`turn-order-row ${index === room.turnIndex ? "current" : ""} ${index < room.turnIndex ? "done" : ""}`}><span className="order-number">{String(index + 1).padStart(2, "0")}</span><span>{player?.avatarUrl ? <img src={player.avatarUrl} alt="" referrerPolicy="no-referrer" /> : player?.avatar}</span><span className="turn-order-player"><b>{player?.name}</b><span className="player-clue-blocks">{player ? playerClues(player.id) : null}</span></span>{index < room.turnIndex ? <Check size={13} /> : index === room.turnIndex ? <span className="your-turn-dot" /> : null}</div>; })}</div>
     </aside></div>}
     {room.status === "voting" && <section className="vote-section panel">        <div className="vote-top"><div><span className="eyebrow">CAST YOUR VOTE</span><h2>{online ? "Who do you suspect?" : `${voter?.name ?? "Player"}, who do you suspect?`}</h2></div><span className={`timer-pill ${countdown <= 8 ? "urgent" : ""}`}><Timer size={15} /> 00:{String(countdown).padStart(2, "0")}</span></div>
-      <p className="vote-intro">Pick one player to eliminate, or vote to skip this round. One vote per person.</p>
+      <p className="vote-intro">Pick any living player, including yourself, or vote to skip. Your choice stays private; everyone can see who has voted.</p>
       {!online && <label className="local-voter-picker">Voting as<select value={activeVoterId} disabled={!canChangeVote} onChange={(event) => setLocalVoterId(event.target.value)}>{room.players.filter((player) => player.alive).map((player) => <option value={player.id} key={player.id}>{player.name}{room.votes[player.id] ? " · voted (can change)" : ""}</option>)}</select></label>}
       {voter && <div className="voter-clue-summary"><span className="player-avatar">{voter.avatarUrl ? <img src={voter.avatarUrl} alt="" referrerPolicy="no-referrer" /> : voter.avatar}</span><span className="vote-player-details"><b>{voter.name} (you)</b><span className="player-clue-blocks">{playerClues(voter.id)}</span></span>{room.votes[voter.id] && <span className="voted-indicator"><Check size={12} /> VOTED</span>}</div>}
-      <div className="vote-options">{room.players.filter((player) => player.alive && player.id !== activeVoterId).map((player) => <button disabled={!canChangeVote} className="vote-option vote-option-with-clues" key={player.id} onClick={() => submitVote(player.id)}><span className="player-avatar">{player.avatarUrl ? <img src={player.avatarUrl} alt="" referrerPolicy="no-referrer" /> : player.avatar}</span><span className="vote-player-details"><b>{player.name}</b><span className="player-clue-blocks">{playerClues(player.id)}</span></span>{room.votes[player.id] && <span className="voted-indicator"><Check size={12} /> VOTED</span>}<Vote size={16} /></button>)}</div>
-      <div className="vote-bottom"><button className="skip-vote" onClick={() => submitVote("skip")} disabled={!canChangeVote}><ArrowDownLeft size={15} /> Skip this vote</button><span>{votedCount}/{room.players.filter((player) => player.alive).length} VOTES IN{voted && " · YOUR VOTE IS IN"}</span></div>
+      <div className="vote-options">{room.players.filter((player) => player.alive).map((player) => <button disabled={!canChangeVote} className={`vote-option vote-option-with-clues ${selectedVote === player.id ? "selected-vote" : ""}`} key={player.id} onClick={() => void submitVote(player.id)}><span className="player-avatar">{player.avatarUrl ? <img src={player.avatarUrl} alt="" referrerPolicy="no-referrer" /> : player.avatar}</span><span className="vote-player-details"><b>{player.name}{player.id === activeVoterId ? " (you)" : ""}</b><span className="player-clue-blocks">{playerClues(player.id)}</span></span>{selectedVote === player.id && <span className="selected-vote-flag"><Check size={12} /> YOUR VOTE</span>}{room.votes[player.id] && <span className="voted-indicator"><Check size={12} /> VOTED</span>}<Vote size={16} /></button>)}</div>
+      <div className="vote-bottom"><button className={`skip-vote ${selectedVote === "skip" ? "selected-vote" : ""}`} onClick={() => void submitVote("skip")} disabled={!canChangeVote}><ArrowDownLeft size={15} /> Skip this vote{selectedVote === "skip" && <span className="selected-vote-flag"><Check size={12} /> YOUR VOTE</span>}</button><span>{votedCount}/{room.players.filter((player) => player.alive).length} VOTES IN{voted && " · YOUR VOTE IS IN"}</span></div>
     </section>}
     {room.status === "results" && <section className="results-panel panel round-results vote-result-arrive"><div className="result-emoji">{room.voteOutcome === "eliminated" ? "🗳️" : room.voteOutcome === "no-votes" ? "⏳" : "🤝"}</div><h2>{room.eliminatedId ? `${room.players.find((player) => player.id === room.eliminatedId)?.name} was evicted.` : room.voteOutcome === "tie" ? "It’s a tie." : room.voteOutcome === "no-votes" ? "No one voted." : "The vote was skipped."}</h2><p>{room.eliminatedId ? room.eliminatedWasImpostor ? "The group caught an impostor. The secret stays secret until all impostors are out." : "A civilian was evicted. The impostor is still among you." : room.voteOutcome === "tie" ? "The top choices received the same number of votes. Nobody is evicted." : room.voteOutcome === "no-votes" ? "The voting timer ran out before any votes were submitted." : "Nobody was evicted this round."}</p><VoteTally room={room} /><div className="remaining-impostors">{remainingImpostorCount} impostor{remainingImpostorCount === 1 ? "" : "s"} remain</div>{canGuess && <div className="guess-inline">{!online && <label className="guesser-picker">HAND THE PHONE TO AN IMPOSTOR<select value={guesserId} onChange={(event) => setGuesserId(event.target.value)}>{room.impostors.filter((id) => room.players.some((player) => player.id === id && player.alive)).map((id) => <option key={id} value={id}>{room.players.find((player) => player.id === id)?.name}</option>)}</select></label>}<button className="text-link" onClick={() => setShowGuess(!showGuess)}>Impostor: guess the secret word to win <ArrowRight size={14} /></button>{showGuess && <form onSubmit={(event) => { event.preventDefault(); onGuess(guess, guesserId); setGuess(""); setShowGuess(false); }}><input value={guess} onChange={(event) => setGuess(event.target.value)} placeholder="Your guess..." /><button className="button-primary">Guess</button></form>}</div>}{canAdvance ? <button className="button-primary result-continue" onClick={onNext}>Continue with the same word <ArrowRight size={16} /></button> : <p className="host-waiting">Waiting for the host to start the next round.</p>}</section>}
     {room.status === "ended" && <section className={`results-panel game-over panel winner-${room.winner}`}><div className="winner-glow" /><div className="result-emoji">{room.winner === "impostor" ? "👻" : "🎉"}</div><h2>{room.winner === "impostor" ? "Impostors win!" : "Civilians win!"}</h2><p>{room.winner === "impostor" ? "The impostor side survived the votes — or guessed the secret word." : "Every impostor was found out. The civilians take the win."}</p>{room.voteCounts && <><div className="vote-outcome-callout">{room.eliminatedId ? `${room.players.find((player) => player.id === room.eliminatedId)?.name} was evicted.` : room.voteOutcome === "tie" ? "The vote ended in a tie." : room.voteOutcome === "no-votes" ? "No one voted." : "The vote was skipped."}</div><VoteTally room={room} /><div className="remaining-impostors">{room.remainingImpostors ?? 0} impostors remain</div></>}<div className="winner-reveal">{room.impostors.map((id) => { const player = room.players.find((entry) => entry.id === id); return <div key={id}><span>{player?.avatarUrl ? <img src={player.avatarUrl} alt="" referrerPolicy="no-referrer" /> : player?.avatar}</span><span><small>IMPOSTOR</small><b>{player?.name}</b></span><Ghost size={17} /></div>; })}</div><div className="result-word"><span>THE SECRET WORD</span><b>{room.word}</b></div><div className="winner-actions">{(!online || room.hostId === userId) && <button className="button-primary" onClick={onRematch}>New game in this lobby <ArrowRight size={16} /></button>}<button className="button-secondary" onClick={onHome}>Back to home</button></div></section>}

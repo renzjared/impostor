@@ -144,6 +144,9 @@ button:disabled { cursor: not-allowed !important; opacity: .45; }
 .player-clue-block { display: inline-block; max-width: 100%; padding: 3px 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 1px solid #37382e; background: #24251f; color: #aead9e; font: 8px var(--mono); }
 .vote-options { grid-template-columns: 1fr; }
 .vote-option.vote-option-with-clues { height: auto; min-height: 55px; }
+.vote-option.selected-vote { border-color: #7a874b; background: #292d20; box-shadow: inset 3px 0 #c9dc76; }
+.selected-vote-flag { display: inline-flex; align-items: center; gap: 4px; padding: 4px 5px; border: 1px solid #68733f; color: #d7e99c; font: 7px var(--mono); white-space: nowrap; }
+.skip-vote.selected-vote { border-color: #7a874b; background: #292d20; color: #d7e99c; }
 .vote-option:disabled { cursor: not-allowed; opacity: .62; }
 .vote-player-details { text-align: left; }
 .voter-clue-summary { min-height: 49px; margin-bottom: 8px; padding: 8px; display: flex; align-items: center; gap: 9px; border: 1px solid #34352d; background: #191a16; }
