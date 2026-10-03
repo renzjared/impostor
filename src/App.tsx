@@ -658,6 +658,7 @@ function App() {
     const impostors = shuffled(room.players.map((player) => player.id)).slice(0, impostorCount);
     const players = room.players.map((player) => ({ ...player, alive: true }));
     const turnOrder = shuffled(players.map((player) => player.id));
+    let hostRole: { is_impostor: boolean; word: string; hint: string } | undefined;
     if (supabase && room.mode === "personal-devices") {
       const roles = players.map((player) => ({
         player_id: player.id, is_impostor: impostors.includes(player.id), word: selected.word,
@@ -665,6 +666,7 @@ function App() {
       }));
       const { error: roleError } = await supabase.rpc("assign_lobby_roles", { p_lobby_id: room.id, p_roles: roles });
       if (roleError) { notify(`Could not assign player roles: ${roleError.message}`); return; }
+      hostRole = roles.find((role) => role.player_id === userId);
     }
     await updateRoom({
       ...room, status: "playing", round: 1, players, turnOrder, turnIndex: 0,
@@ -674,7 +676,17 @@ function App() {
     });
     setReveal(false);
     setPassTurnReady(false);
-    setLoadedRoleKey("");
+    if (hostRole) {
+      setRoom((current) => current && current.id === room.id ? {
+        ...current,
+        word: hostRole.word,
+        hint: hostRole.hint,
+        impostors,
+      } : current);
+      setLoadedRoleKey(`${room.id}:1:${userId}`);
+    } else {
+      setLoadedRoleKey("");
+    }
     setScreen("game");
     setCountdown(30);
     audio.cue("start");
@@ -1182,6 +1194,7 @@ function Lobby({ room, userId, packs, online, onBack, onReady, onStart, onAddPla
   const isHost = room.hostId === userId;
   const readyCount = room.players.filter((player) => player.ready).length;
   const canStart = room.players.length >= 3 && readyCount === room.players.length;
+  const me = room.players.find((player) => player.id === userId);
   return <div className="lobby-page">
     <div className="game-breadcrumb"><button onClick={onBack}><ArrowLeft size={15} /> Back to home</button><span>/</span><span>LOBBY</span></div>
     <div className="lobby-title-row"><div><span className="modal-kicker">{room.isPublic ? "PUBLIC ROOM" : "PRIVATE ROOM"} · {room.mode === "pass-and-play" ? "ONE DEVICE" : "PERSONAL DEVICES"}</span><h1>{room.name}</h1><p>{room.mode === "pass-and-play" ? "Add your friends, then pass the device around." : "Waiting for the crew. Everyone plays on their own device."}</p></div>{room.mode === "personal-devices" && <span className="room-code-badge">ROOM CODE <b>{room.code}</b><button title="Copy invite link" onClick={onCopy}><Copy size={14} /></button></span>}</div>
@@ -1192,7 +1205,7 @@ function Lobby({ room, userId, packs, online, onBack, onReady, onStart, onAddPla
         {room.players.length < 3 && Array.from({ length: 3 - room.players.length }, (_, i) => <div className="player-tile waiting-tile" key={`waiting-${i}`}><span className="player-avatar waiting-avatar"><Users size={17} /></span><span className="player-name">Waiting for someone...</span><span className="ready-indicator" /></div>)}
       </div>
       {online ? <div className="lobby-invite"><span className="invite-icon"><Link2 size={17} /></span><span><b>Know someone who’d be suspicious?</b><small>Share the invite link. Anyone with it can join.</small></span><button className="button-secondary" onClick={onCopy}>Copy invite link <Copy size={14} /></button></div> : <div className="lobby-invite"><span className="invite-icon"><LockKeyhole size={17} /></span><span><b>One device, one secret at a time.</b><small>Before every turn, pass the screen to the named player to reveal their role privately.</small></span></div>}
-      <div className="lobby-bottom"><div className="lobby-player-actions"><span className="readiness-count">{readyCount}/{room.players.length} READY</span><button className="leave-lobby-button" onClick={onBack}><ArrowLeft size={14} /> Leave lobby</button></div>
+      <div className="lobby-bottom"><div className="lobby-player-actions"><button className={`ready-button ${me?.ready ? "ready" : ""}`} onClick={() => onReady(userId)}><Check size={16} /> {me?.ready ? "You’re ready" : "I’m ready"}</button><span className="readiness-count">{readyCount}/{room.players.length} READY</span><button className="leave-lobby-button" onClick={onBack}><ArrowLeft size={14} /> Leave lobby</button></div>
         {isHost ? <button className="button-primary start-button" disabled={!canStart} title={room.players.length < 3 ? "At least 3 players are required" : !canStart ? "Everyone must be ready first" : undefined} onClick={onStart}>{canStart ? "Start the game" : "Waiting for everyone"} <ArrowRight size={16} /></button> : <span className="host-start-hint">Host will start when everyone is ready</span>}
       </div>
     </section>
