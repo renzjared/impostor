@@ -26,6 +26,22 @@ function read<T>(key: string, fallback: T): T {
 
 }
 
+function normalizeRoomState(state: unknown, fallback: GameRoom | null = null): GameRoom | null {
+  if (!state || typeof state !== "object" || Array.isArray(state)) return fallback;
+  const incoming = state as Partial<GameRoom>;
+  const merged = { ...fallback, ...incoming };
+  if (!merged.id || !merged.name || !merged.hostId) return fallback;
+  return {
+    ...merged,
+    players: Array.isArray(merged.players) ? merged.players : fallback?.players ?? [],
+    packs: Array.isArray(merged.packs) ? merged.packs : fallback?.packs ?? [],
+    turnOrder: Array.isArray(merged.turnOrder) ? merged.turnOrder : fallback?.turnOrder ?? [],
+    clues: Array.isArray(merged.clues) ? merged.clues : fallback?.clues ?? [],
+    votes: merged.votes && typeof merged.votes === "object" && !Array.isArray(merged.votes) ? merged.votes : fallback?.votes ?? {},
+    impostors: Array.isArray(merged.impostors) ? merged.impostors : fallback?.impostors ?? [],
+  } as GameRoom;
+}
+
 function makePlayer(name: string, id: string = randomId(), avatar?: string, avatarUrl?: string): Player {
   return { id, name: name.trim().slice(0, 32), avatar: avatar || AVATARS[Math.floor(Math.random() * AVATARS.length)]!, avatarUrl, ready: false, alive: true };
 }
@@ -170,7 +186,7 @@ function App() {
   const [pendingJoin, setPendingJoin] = useState("");
   const [name, setName] = useState(() => read(USER_KEY, ""));
   const [room, setRoom] = useState<GameRoom | null>(() => {
-    const saved = read<GameRoom | null>(ROOM_KEY, null);
+    const saved = normalizeRoomState(read<unknown>(ROOM_KEY, null));
     return saved ? { ...saved, mode: saved.mode || (hasSupabase ? "personal-devices" : "pass-and-play") } : null;
   });
   const [customPacks, setCustomPacks] = useState<CustomPack[]>(() => read(CUSTOM_KEY, []));
@@ -298,7 +314,10 @@ function App() {
       notify(`Could not load public rooms: ${error.message}`);
       return;
     }
-    setPublicRooms((data || []).map((row) => ({ ...(row.state as GameRoom), id: row.id, code: row.code, name: row.name })));
+    setPublicRooms((data || []).flatMap((row) => {
+      const normalized = normalizeRoomState(row.state);
+      return normalized ? [{ ...normalized, id: row.id, code: row.code, name: row.name }] : [];
+    }));
   }, [notify]);
 
   useEffect(() => {
@@ -327,16 +346,21 @@ function App() {
     if (!supabase || !room || room.mode !== "personal-devices") return;
     const channel = supabase.channel(`lobby-${room.id}`)
       .on("postgres_changes", { event: "UPDATE", schema: "public", table: "lobbies", filter: `id=eq.${room.id}` }, (change) => {
-        const incoming = change.new.state as GameRoom;
+        const incoming = normalizeRoomState(change.new.state);
+        if (!incoming) {
+          notify("Received invalid lobby data. Refresh the page or rejoin the lobby.");
+          return;
+        }
         setRoom((current) => {
           if (!current || current.id !== room.id) return current;
           const newGame = incoming.status === "playing" && incoming.round === 1 && current.status === "ended";
-          return {
+          const merged = normalizeRoomState({
             ...incoming,
             word: newGame ? undefined : incoming.word || current.word,
             hint: newGame ? undefined : incoming.hint || current.hint,
-            impostors: newGame ? [] : incoming.impostors?.length ? incoming.impostors : current.impostors,
-          };
+            impostors: newGame ? [] : incoming.impostors.length ? incoming.impostors : current.impostors,
+          }, current);
+          return merged;
         });
       }).subscribe();
     return () => { void supabase?.removeChannel(channel); };
@@ -354,12 +378,12 @@ function App() {
       if (!alive || !data?.length) return;
       const ownRole = data.find((role) => role.player_id === userId);
       if (!ownRole) return;
-      setRoom((current) => current && current.id === room.id ? {
+      setRoom((current) => current && current.id === room.id ? normalizeRoomState({
         ...current,
         word: ownRole.word,
         hint: ownRole.hint,
         impostors: ownRole.is_impostor && !current.impostors.includes(userId) ? [...current.impostors, userId] : current.impostors,
-      } : current);
+      }, current) : current);
     });
     return () => { alive = false; };
   }, [room?.id, room?.status, userId, notify]);
@@ -506,7 +530,12 @@ function App() {
         return;
       }
       const row = Array.isArray(data) ? data[0] : data;
-      target = { ...(row.state as GameRoom), id: row.id, code: row.code, name: row.name };
+      const joinedRoom = normalizeRoomState({ ...(row.state as object), id: row.id, code: row.code, name: row.name });
+      if (!joinedRoom) {
+        notify("The lobby returned invalid game data. Please refresh and try joining again.");
+        return;
+      }
+      target = joinedRoom;
       if (target.mode !== "personal-devices") {
         notify("Pass-and-play rooms are only available on the host’s device.");
         return;
@@ -568,7 +597,7 @@ function App() {
         return;
       }
       const row = Array.isArray(data) ? data[0] : data;
-      if (row) setRoom({ ...(row.state as GameRoom), id: row.id, code: row.code, name: row.name });
+      if (row) setRoom(normalizeRoomState({ ...(row.state as object), id: row.id, code: row.code, name: row.name }, room));
     } else {
       await updateRoom({ ...room, players: room.players.filter((player) => player.id !== playerId) });
     }
@@ -653,7 +682,7 @@ function App() {
         return false;
       }
       const row = Array.isArray(data) ? data[0] : data;
-      setRoom({ ...(row.state as GameRoom), id: row.id, code: row.code, name: row.name });
+      setRoom(normalizeRoomState({ ...(row.state as object), id: row.id, code: row.code, name: row.name }, room));
       return true;
     }
     const votes = { ...room.votes, [voterId]: choice };
@@ -673,7 +702,7 @@ function App() {
         const { data: latest, error: refreshError } = await supabase.from("lobbies")
           .select("id, code, name, state, status").eq("id", current.id).maybeSingle();
         if (!refreshError && latest && latest.status !== "voting") {
-          setRoom({ ...(latest.state as GameRoom), id: latest.id, code: latest.code, name: latest.name });
+          setRoom(normalizeRoomState({ ...(latest.state as object), id: latest.id, code: latest.code, name: latest.name }, current));
           setScreen("game");
           resolvingVoteRef.current = false;
           return;
@@ -683,7 +712,7 @@ function App() {
         return;
       }
       const row = Array.isArray(data) ? data[0] : data;
-      setRoom({ ...(row.state as GameRoom), id: row.id, code: row.code, name: row.name });
+      setRoom(normalizeRoomState({ ...(row.state as object), id: row.id, code: row.code, name: row.name }, current));
       setScreen("game");
       resolvingVoteRef.current = false;
       return;
