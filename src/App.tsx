@@ -48,6 +48,22 @@ function normalizeRoomState(state: unknown, fallback: GameRoom | null = null): G
   } as GameRoom;
 }
 
+function normalizeSyncedRoomState(state: unknown, fallback: GameRoom): GameRoom | null {
+  const normalized = normalizeRoomState(state, fallback);
+  if (!normalized) return null;
+  const sameGame = normalized.status !== "lobby"
+    && normalized.status !== "ended"
+    && fallback.status !== "lobby"
+    && normalized.round === fallback.round;
+  if (!sameGame) return normalized;
+  return {
+    ...normalized,
+    word: fallback.word,
+    hint: fallback.hint,
+    impostors: fallback.impostors,
+  };
+}
+
 function makePlayer(name: string, id: string = randomId(), avatar?: string, avatarUrl?: string): Player {
   return { id, name: name.trim().slice(0, 32), avatar: avatar || AVATARS[Math.floor(Math.random() * AVATARS.length)]!, avatarUrl, ready: false, alive: true };
 }
@@ -603,7 +619,7 @@ function App() {
         notify("Could not update readiness: no room state returned.");
         return;
       }
-      setRoom(normalizeRoomState({ ...(row.state as object), id: row.id, code: row.code, name: row.name }, room));
+      setRoom(normalizeSyncedRoomState({ ...(row.state as object), id: row.id, code: row.code, name: row.name }, room));
       return;
     }
     void updateRoom({ ...room, players: room.players.map((player) => player.id === playerId ? { ...player, ready: !player.ready } : player) });
@@ -637,7 +653,7 @@ function App() {
         return;
       }
       const row = Array.isArray(data) ? data[0] : data;
-      if (row) setRoom(normalizeRoomState({ ...(row.state as object), id: row.id, code: row.code, name: row.name }, room));
+      if (row) setRoom(normalizeSyncedRoomState({ ...(row.state as object), id: row.id, code: row.code, name: row.name }, room));
     } else {
       await updateRoom({ ...room, players: room.players.filter((player) => player.id !== playerId) });
     }
@@ -795,7 +811,7 @@ function App() {
         return;
       }
       const row = Array.isArray(data) ? data[0] : data;
-      const updated = normalizeRoomState({ ...(row.state as object), id: row.id, code: row.code, name: row.name }, room);
+      const updated = normalizeSyncedRoomState({ ...(row.state as object), id: row.id, code: row.code, name: row.name }, room);
       if (!updated) {
         notify("The lobby returned invalid game data. Please refresh and try again.");
         return;
@@ -840,7 +856,7 @@ function App() {
         return false;
       }
       const row = Array.isArray(data) ? data[0] : data;
-      setRoom(normalizeRoomState({ ...(row.state as object), id: row.id, code: row.code, name: row.name }, room));
+      setRoom(normalizeSyncedRoomState({ ...(row.state as object), id: row.id, code: row.code, name: row.name }, room));
       return true;
     }
     const votes = { ...room.votes, [voterId]: choice };
@@ -861,7 +877,7 @@ function App() {
         const { data: latest, error: refreshError } = await supabase.from("lobbies")
           .select("id, code, name, state, status").eq("id", normalizedCurrent.id).maybeSingle();
         if (!refreshError && latest && latest.status !== "voting") {
-          setRoom(normalizeRoomState({ ...(latest.state as object), id: latest.id, code: latest.code, name: latest.name }, normalizedCurrent));
+          setRoom(normalizeSyncedRoomState({ ...(latest.state as object), id: latest.id, code: latest.code, name: latest.name }, normalizedCurrent));
           setScreen("game");
           resolvingVoteRef.current = false;
           return;
@@ -871,7 +887,7 @@ function App() {
         return;
       }
       const row = Array.isArray(data) ? data[0] : data;
-      setRoom(normalizeRoomState({ ...(row.state as object), id: row.id, code: row.code, name: row.name }, normalizedCurrent));
+      setRoom(normalizeSyncedRoomState({ ...(row.state as object), id: row.id, code: row.code, name: row.name }, normalizedCurrent));
       setScreen("game");
       resolvingVoteRef.current = false;
       return;
