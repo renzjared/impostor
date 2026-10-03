@@ -40,6 +40,9 @@ export type GameRoom = {
   impostors: string[];
   eliminatedId?: string;
   eliminatedWasImpostor?: boolean;
+  voteCounts?: Record<string, number>;
+  voteOutcome?: "eliminated" | "tie" | "no-votes" | "skip";
+  remainingImpostors?: number;
   winner?: "impostor" | "civilians";
 };
 

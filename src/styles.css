@@ -132,6 +132,38 @@ button:disabled { cursor: not-allowed !important; opacity: .45; }
 .role-intro-card > b { color: var(--acid); font: 700 clamp(28px, 7vw, 43px)/1.1 var(--display); overflow-wrap: anywhere; }
 .role-intro-card > small { color: #c5c5b5; font-size: 11px; }
 .timer-pill.urgent { animation: timer-rush .7s ease-in-out infinite alternate; }
+.impostor-screen { --acid: #ff5968; }
+.impostor-screen .secret-card { border-color: #703641; background: #2d1d22; }
+.impostor-screen .secret-kicker, .impostor-screen .secret-kicker svg { color: #ff8790; }
+.impostor-screen .secret-word, .impostor-screen .game-round-tag b, .impostor-screen .role-intro-card > b { color: #ff5968; }
+.turn-order-player, .vote-player-details { min-width: 0; flex: 1; display: grid; gap: 4px; }
+.turn-order-player b, .vote-player-details b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.turn-order-row { height: auto; min-height: 38px; padding: 4px 0; align-items: start; }
+.turn-order-player { padding: 1px 0 3px; }
+.player-clue-blocks { display: flex; flex-wrap: wrap; gap: 3px; }
+.player-clue-block { display: inline-block; max-width: 100%; padding: 3px 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 1px solid #37382e; background: #24251f; color: #aead9e; font: 8px var(--mono); }
+.vote-options { grid-template-columns: 1fr; }
+.vote-option.vote-option-with-clues { height: auto; min-height: 55px; }
+.vote-option:disabled { cursor: not-allowed; opacity: .62; }
+.vote-player-details { text-align: left; }
+.voter-clue-summary { min-height: 49px; margin-bottom: 8px; padding: 8px; display: flex; align-items: center; gap: 9px; border: 1px solid #34352d; background: #191a16; }
+.local-voter-picker { display: flex; align-items: center; gap: 8px; margin: 10px 0; color: #a6a796; font: 8px var(--mono); }
+.local-voter-picker select { max-width: 220px; border: 1px solid #454735; background: #1b1d16; color: var(--cream); padding: 6px 8px; font-size: 9px; }
+.voted-indicator { display: inline-flex; align-items: center; gap: 3px; padding: 4px 5px; border: 1px solid #56603a; color: #cce681; font: 7px var(--mono); white-space: nowrap; }
+.vote-result-arrive { animation: vote-result-arrive .5s cubic-bezier(.16,1,.3,1) both; }
+.vote-tally { margin: 16px 0 10px; padding: 12px; border: 1px solid #38392f; background: #151611; text-align: left; }
+.vote-tally h3 { margin: 0 0 10px; color: #c4c4b8; font: 8px var(--mono); letter-spacing: 1px; text-transform: uppercase; }
+.vote-tally-row { display: grid; grid-template-columns: minmax(85px, .8fr) minmax(55px, 1fr) 18px; align-items: center; gap: 8px; min-height: 25px; }
+.vote-tally-player { min-width: 0; display: flex; align-items: center; gap: 6px; color: #c6c5ba; font-size: 9px; }
+.vote-tally-player img { width: 18px; height: 18px; object-fit: cover; border-radius: 50%; }
+.vote-tally-player b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.vote-tally-bar { height: 5px; overflow: hidden; border-radius: 4px; background: #2d2e27; }
+.vote-tally-bar i { display: block; height: 100%; border-radius: inherit; background: var(--acid); transition: width .6s ease; }
+.skip-tally .vote-tally-bar i { background: #a3a393; }
+.vote-tally-count { color: var(--cream); font: 10px var(--mono); text-align: right; }
+.remaining-impostors { margin: 8px 0 12px; padding: 8px; border: 1px solid #444633; background: #22241b; color: #d7e59c; font: 9px var(--mono); text-align: center; }
+.vote-outcome-callout { margin: 12px 0; padding: 9px; border: 1px solid #444633; background: #22241b; color: #d7e59c; font: 10px var(--mono); animation: vote-result-arrive .5s ease-out both; }
+@keyframes vote-result-arrive { from { opacity: 0; transform: translateY(20px) scale(.97); } to { opacity: 1; transform: none; } }
 @keyframes role-card-transfer {
   0%, 29% { opacity: 1; transform: translate(0, 0) scale(1); }
   100% { opacity: 0; transform: translate(34vw, -31vh) scale(.28); }
