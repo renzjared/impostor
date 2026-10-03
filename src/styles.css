@@ -245,3 +245,11 @@ button:disabled { cursor: not-allowed !important; opacity: .45; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+.ready-toggle { width: 24px; height: 24px; flex: 0 0 24px; display: grid; place-items: center; border: 1px solid #45463a; background: #191a16; color: #77786d; cursor: pointer; }
+.ready-toggle:not(:disabled):hover { border-color: #75834b; color: #d0e58b; }
+.ready-toggle.is-ready { border-color: #58643a; background: #292d20; color: var(--acid); }
+.ready-toggle:disabled { cursor: default; opacity: 1; }
+.readiness-count { color: #aeb38f; font: 8px var(--mono); letter-spacing: .6px; }
+.stop-game-button { display: inline-flex; align-items: center; gap: 5px; padding: 5px 7px; border: 1px solid #654044; background: #281b1d; color: #e6a8aa; font: 8px var(--mono); cursor: pointer; }
+.stop-game-button:hover { border-color: #a64d56; background: #382025; color: #ffb2b5; }
+.role-loading { min-height: 60vh; display: grid; place-items: center; color: #b8be9c; font: 11px var(--mono); letter-spacing: .8px; }

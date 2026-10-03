@@ -204,6 +204,7 @@ function App() {
   const [reveal, setReveal] = useState(false);
   const [passTurnReady, setPassTurnReady] = useState(false);
   const [clueInput, setClueInput] = useState("");
+  const [loadedRoleKey, setLoadedRoleKey] = useState("");
   const [wordSearch, setWordSearch] = useState("");
   const [showCreatePack, setShowCreatePack] = useState(false);
   const [editingPack, setEditingPack] = useState<string | null>(null);
@@ -364,11 +365,20 @@ function App() {
         setRoom((current) => {
           if (!current || current.id !== room.id) return current;
           const newGame = incoming.status === "playing" && incoming.round === 1 && current.status === "ended";
+          const returnedToLobby = incoming.status === "lobby";
           const merged = normalizeRoomState({
             ...incoming,
-            word: newGame ? undefined : incoming.word || current.word,
-            hint: newGame ? undefined : incoming.hint || current.hint,
-            impostors: newGame ? [] : incoming.impostors.length ? incoming.impostors : current.impostors,
+            word: newGame || returnedToLobby ? undefined : incoming.word || current.word,
+            hint: newGame || returnedToLobby ? undefined : incoming.hint || current.hint,
+            impostors: newGame || returnedToLobby ? [] : incoming.impostors.length ? incoming.impostors : current.impostors,
+            ...(returnedToLobby ? {
+              eliminatedId: undefined,
+              eliminatedWasImpostor: undefined,
+              voteCounts: undefined,
+              voteOutcome: undefined,
+              remainingImpostors: undefined,
+              winner: undefined,
+            } : {}),
           }, current);
           return merged;
         });
@@ -392,16 +402,20 @@ function App() {
         ...current,
         word: ownRole.word,
         hint: ownRole.hint,
-        impostors: ownRole.is_impostor && !current.impostors.includes(userId) ? [...current.impostors, userId] : current.impostors,
+        impostors: [
+          ...(current.hostId === userId ? current.impostors.filter((id) => id !== userId) : []),
+          ...(ownRole.is_impostor ? [userId] : []),
+        ],
       }, current) : current);
+      setLoadedRoleKey(`${room.id}:${room.round}:${userId}`);
     });
     return () => { alive = false; };
-  }, [room?.id, room?.status, userId, notify]);
+  }, [room?.id, room?.status, room?.round, userId, notify]);
 
   useEffect(() => {
     if (!room) return;
     const previous = phaseRef.current;
-    if (room.status !== "lobby") setScreen("game");
+    setScreen(room.status === "lobby" ? "lobby" : "game");
     if (previous?.id !== room.id || previous.status !== room.status || previous.turnIndex !== room.turnIndex) {
       setCountdown(room.status === "voting" ? room.voteSeconds : 30);
       if (room.status === "playing") {
@@ -574,9 +588,25 @@ function App() {
     setModal(null);
   };
 
-  const toggleReady = () => {
-    if (!room) return;
-    void updateRoom({ ...room, players: room.players.map((player) => player.id === userId ? { ...player, ready: !player.ready } : player) });
+  const setPlayerReady = async (playerId: string) => {
+    if (!room || room.mode === "personal-devices" && playerId !== userId) return;
+    if (room.mode === "personal-devices" && supabase) {
+      const player = room.players.find((entry) => entry.id === playerId);
+      if (!player) return;
+      const { data, error } = await supabase.rpc("set_lobby_ready", { p_lobby_id: room.id, p_ready: !player.ready });
+      if (error || !data) {
+        notify(`Could not update readiness: ${error?.message || "No room state returned."}`);
+        return;
+      }
+      const row = Array.isArray(data) ? data[0] : data;
+      if (!row) {
+        notify("Could not update readiness: no room state returned.");
+        return;
+      }
+      setRoom(normalizeRoomState({ ...(row.state as object), id: row.id, code: row.code, name: row.name }, room));
+      return;
+    }
+    void updateRoom({ ...room, players: room.players.map((player) => player.id === playerId ? { ...player, ready: !player.ready } : player) });
   };
 
   const leaveLobby = async () => {
@@ -616,6 +646,10 @@ function App() {
   const startGame = async () => {
     if (!room) return;
     if (room.players.length < 3) { notify("Gather at least 3 players to start."); return; }
+    if (room.players.some((player) => !player.ready)) {
+      notify("Everyone must be ready before the host can start.");
+      return;
+    }
     const packMap = [...CORE_PACKS, ...customPacks].reduce<Record<string, { words: { word: string; hints: string[] }[] }>>((map, pack) => ({ ...map, [pack.id]: pack }), {});
     const words = room.packs.flatMap((id) => packMap[id]?.words || []);
     if (!words.length) { notify("Select at least one pack with words."); return; }
@@ -640,9 +674,76 @@ function App() {
     });
     setReveal(false);
     setPassTurnReady(false);
+    setLoadedRoleKey("");
     setScreen("game");
     setCountdown(30);
     audio.cue("start");
+  };
+
+  const stopGame = async () => {
+    if (!room || room.hostId !== userId || room.status === "lobby") return;
+    if (supabase && room.mode === "personal-devices") {
+      const { data, error } = await supabase.rpc("stop_lobby_game", { p_lobby_id: room.id });
+      if (error || !data) {
+        notify(`Could not return the game to the lobby: ${error?.message || "No room state returned."}`);
+        return;
+      }
+      const row = Array.isArray(data) ? data[0] : data;
+      const reset = normalizeRoomState({
+        ...(row.state as object),
+        id: row.id,
+        code: row.code,
+        name: row.name,
+        status: "lobby",
+        round: 0,
+        players: (row.state as Partial<GameRoom>).players?.map((player) => ({ ...player, alive: true, ready: false }))
+          || room.players.map((player) => ({ ...player, alive: true, ready: false })),
+        turnOrder: [],
+        turnIndex: 0,
+        clues: [],
+        votes: {},
+        word: undefined,
+        hint: undefined,
+        impostors: [],
+        eliminatedId: undefined,
+        eliminatedWasImpostor: undefined,
+        voteCounts: undefined,
+        voteOutcome: undefined,
+        remainingImpostors: undefined,
+        winner: undefined,
+      }, room);
+      if (!reset) {
+        notify("The lobby returned invalid reset data.");
+        return;
+      }
+      setRoom(reset);
+    } else {
+      const reset: GameRoom = {
+        ...room,
+        status: "lobby",
+        round: 0,
+        players: room.players.map((player) => ({ ...player, alive: true, ready: false })),
+        turnOrder: [],
+        turnIndex: 0,
+        clues: [],
+        votes: {},
+        word: undefined,
+        hint: undefined,
+        impostors: [],
+        eliminatedId: undefined,
+        eliminatedWasImpostor: undefined,
+        voteCounts: undefined,
+        voteOutcome: undefined,
+        remainingImpostors: undefined,
+        winner: undefined,
+      };
+      await updateRoom(reset);
+    }
+    setLoadedRoleKey("");
+    setReveal(false);
+    setPassTurnReady(false);
+    setCountdown(30);
+    setScreen("lobby");
   };
 
   useEffect(() => {
@@ -911,16 +1012,17 @@ function App() {
           onJoinCode={joinRoom} onRules={() => setModal("rules")} onPacks={() => setScreen("packs")}
         />}
         {screen === "lobby" && room && <Lobby room={room} userId={userId} packs={allPacks} online={room.mode === "personal-devices"}
-          onBack={() => void leaveLobby()} onReady={toggleReady} onStart={startGame} onAddPlayer={() => setModal("addPlayer")} onKick={(playerId) => void kickPlayer(playerId)}
+          onBack={() => void leaveLobby()} onReady={(playerId) => void setPlayerReady(playerId)} onStart={startGame} onAddPlayer={() => setModal("addPlayer")} onKick={(playerId) => void kickPlayer(playerId)}
           onCopy={() => void copyInvite()}
           onPacks={(ids) => void updateRoom({ ...room, packs: ids })}
           onSettings={(key, value) => void updateRoom({ ...room, [key]: value })}
           />}
         {screen === "game" && room && <Game
-          room={room} userId={userId} voterId={room.mode === "personal-devices" ? userId : (room.players.find((player) => player.alive && !room.votes[player.id])?.id || userId)} online={room.mode === "personal-devices"} countdown={countdown} reveal={reveal} setReveal={setReveal}
+          room={room} userId={userId} voterId={room.mode === "personal-devices" ? userId : (room.players.find((player) => player.alive && !room.votes[player.id])?.id || userId)} online={room.mode === "personal-devices"} roleReady={room.mode !== "personal-devices" || loadedRoleKey === `${room.id}:${room.round}:${userId}`} countdown={countdown} reveal={reveal} setReveal={setReveal}
           passTurnReady={passTurnReady} onPassTurnReady={() => setPassTurnReady(true)} onRematch={() => void startRematch()} onRevealRole={() => audio.cue("reveal")}
           clueInput={clueInput} setClueInput={setClueInput} onSubmit={() => void submitClue()}
           onVote={castVote} onNext={() => void nextRound()} canAdvance={!supabase || room.hostId === userId} onHome={leaveRoom}
+          onStop={room.hostId === userId ? () => void stopGame() : undefined}
           onGuess={async (guess, guesserId) => {
             if (!room || room.mode === "pass-and-play" && !room.impostors.includes(guesserId)) return;
             if (room.mode === "personal-devices" && supabase) {
@@ -1074,23 +1176,24 @@ function JoinDialog({ initialCode, onCancel, onJoin, name, setName }: { initialC
 }
 
 function Lobby({ room, userId, packs, online, onBack, onReady, onStart, onAddPlayer, onKick, onCopy, onPacks, onSettings }: {
-  room: GameRoom; userId: string; packs: Pack[]; online: boolean; onBack: () => void; onReady: () => void; onStart: () => void; onAddPlayer: () => void; onKick: (playerId: string) => void;
+  room: GameRoom; userId: string; packs: Pack[]; online: boolean; onBack: () => void; onReady: (playerId: string) => void; onStart: () => void; onAddPlayer: () => void; onKick: (playerId: string) => void;
   onCopy: () => void; onPacks: (ids: string[]) => void; onSettings: (key: "impostorCount" | "voteSeconds", value: number) => void;
 }) {
   const isHost = room.hostId === userId;
-  const me = room.players.find((player) => player.id === userId);
+  const readyCount = room.players.filter((player) => player.ready).length;
+  const canStart = room.players.length >= 3 && readyCount === room.players.length;
   return <div className="lobby-page">
     <div className="game-breadcrumb"><button onClick={onBack}><ArrowLeft size={15} /> Back to home</button><span>/</span><span>LOBBY</span></div>
     <div className="lobby-title-row"><div><span className="modal-kicker">{room.isPublic ? "PUBLIC ROOM" : "PRIVATE ROOM"} · {room.mode === "pass-and-play" ? "ONE DEVICE" : "PERSONAL DEVICES"}</span><h1>{room.name}</h1><p>{room.mode === "pass-and-play" ? "Add your friends, then pass the device around." : "Waiting for the crew. Everyone plays on their own device."}</p></div>{room.mode === "personal-devices" && <span className="room-code-badge">ROOM CODE <b>{room.code}</b><button title="Copy invite link" onClick={onCopy}><Copy size={14} /></button></span>}</div>
     <div className="lobby-layout"><section className="lobby-main panel">
       <div className="panel-heading"><div><h2>Players <span>{room.players.length}/12</span></h2></div><span className="waiting-badge">WAITING FOR PLAYERS</span></div>
-      <div className="player-grid">{room.players.map((player, i) => <div key={player.id} className={`player-tile ${player.id === userId ? "is-you" : ""}`}><span className={`player-avatar player-color-${i % 6}`}>{player.avatarUrl ? <img src={player.avatarUrl} alt="" referrerPolicy="no-referrer" /> : player.avatar}</span><span className="player-name">{player.name}{player.id === userId && <small>YOU</small>}</span>{player.id === room.hostId ? <Crown size={14} className="host-crown" /> : <span className={`ready-indicator ${player.ready ? "is-ready" : ""}`} />}{isHost && player.id !== userId && <button className="kick-player-button" title={`Kick ${player.name}`} aria-label={`Kick ${player.name}`} onClick={() => onKick(player.id)}><X size={14} /></button>}</div>)}
+      <div className="player-grid">{room.players.map((player, i) => <div key={player.id} className={`player-tile ${player.id === userId ? "is-you" : ""}`}><span className={`player-avatar player-color-${i % 6}`}>{player.avatarUrl ? <img src={player.avatarUrl} alt="" referrerPolicy="no-referrer" /> : player.avatar}</span><span className="player-name">{player.name}{player.id === userId && <small>YOU</small>}</span>{player.id === room.hostId && <Crown size={14} className="host-crown" />}<button className={`ready-toggle ${player.ready ? "is-ready" : ""}`} disabled={online && player.id !== userId} title={online && player.id !== userId ? `${player.name} must mark themselves ready` : `${player.ready ? "Unmark" : "Mark"} ${player.name} ready`} aria-label={`${player.ready ? "Unmark" : "Mark"} ${player.name} ready`} onClick={() => onReady(player.id)}><Check size={13} /></button>{isHost && player.id !== userId && <button className="kick-player-button" title={`Kick ${player.name}`} aria-label={`Kick ${player.name}`} onClick={() => onKick(player.id)}><X size={14} /></button>}</div>)}
         {room.players.length < 12 && !online && <button className="player-tile add-player-tile" onClick={onAddPlayer}><span className="add-player-icon"><Plus size={19} /></span><span className="player-name">Add player</span></button>}
         {room.players.length < 3 && Array.from({ length: 3 - room.players.length }, (_, i) => <div className="player-tile waiting-tile" key={`waiting-${i}`}><span className="player-avatar waiting-avatar"><Users size={17} /></span><span className="player-name">Waiting for someone...</span><span className="ready-indicator" /></div>)}
       </div>
       {online ? <div className="lobby-invite"><span className="invite-icon"><Link2 size={17} /></span><span><b>Know someone who’d be suspicious?</b><small>Share the invite link. Anyone with it can join.</small></span><button className="button-secondary" onClick={onCopy}>Copy invite link <Copy size={14} /></button></div> : <div className="lobby-invite"><span className="invite-icon"><LockKeyhole size={17} /></span><span><b>One device, one secret at a time.</b><small>Before every turn, pass the screen to the named player to reveal their role privately.</small></span></div>}
-      <div className="lobby-bottom"><div className="lobby-player-actions"><button className={`ready-button ${me?.ready ? "ready" : ""}`} onClick={onReady}><Check size={16} /> {me?.ready ? "You’re ready" : "I’m ready"}</button><button className="leave-lobby-button" onClick={onBack}><ArrowLeft size={14} /> Leave lobby</button></div>
-        {isHost ? <button className="button-primary start-button" disabled={room.players.length < 3} onClick={onStart}>Start the game <ArrowRight size={16} /></button> : <span className="host-start-hint">Host will start the game</span>}
+      <div className="lobby-bottom"><div className="lobby-player-actions"><span className="readiness-count">{readyCount}/{room.players.length} READY</span><button className="leave-lobby-button" onClick={onBack}><ArrowLeft size={14} /> Leave lobby</button></div>
+        {isHost ? <button className="button-primary start-button" disabled={!canStart} title={room.players.length < 3 ? "At least 3 players are required" : !canStart ? "Everyone must be ready first" : undefined} onClick={onStart}>{canStart ? "Start the game" : "Waiting for everyone"} <ArrowRight size={16} /></button> : <span className="host-start-hint">Host will start when everyone is ready</span>}
       </div>
     </section>
     <aside className="lobby-aside"><section className="panel settings-panel"><div className="panel-heading"><div><h2>Game setup</h2></div><Settings2 size={17} /></div>
@@ -1120,11 +1223,11 @@ function VoteTally({ room }: { room: GameRoom }) {
   </section>;
 }
 
-function Game({ room, userId, voterId, online, countdown, reveal, setReveal, passTurnReady, onPassTurnReady, onRematch, onRevealRole, canAdvance, clueInput, setClueInput, onSubmit, onVote, onNext, onHome, onGuess }: {
-  room: GameRoom; userId: string; voterId: string; online: boolean; countdown: number; reveal: boolean; setReveal: (reveal: boolean) => void;
+function Game({ room, userId, voterId, online, roleReady, countdown, reveal, setReveal, passTurnReady, onPassTurnReady, onRematch, onRevealRole, canAdvance, clueInput, setClueInput, onSubmit, onVote, onNext, onHome, onGuess, onStop }: {
+  room: GameRoom; userId: string; voterId: string; online: boolean; roleReady: boolean; countdown: number; reveal: boolean; setReveal: (reveal: boolean) => void;
   passTurnReady: boolean; onPassTurnReady: () => void; onRematch: () => void; onRevealRole: () => void; canAdvance: boolean;
   clueInput: string; setClueInput: (clue: string) => void;
-  onSubmit: () => void; onVote: (id: string, voterId: string) => Promise<boolean>; onNext: () => void; onHome: () => void; onGuess: (guess: string, guesserId: string) => void | Promise<void>;
+  onSubmit: () => void; onVote: (id: string, voterId: string) => Promise<boolean>; onNext: () => void; onHome: () => void; onGuess: (guess: string, guesserId: string) => void | Promise<void>; onStop?: () => void;
 }) {
   const currentId = room.turnOrder[room.turnIndex];
   const currentPlayer = room.players.find((player) => player.id === currentId);
@@ -1158,13 +1261,13 @@ function Game({ room, userId, voterId, online, countdown, reveal, setReveal, pas
       setRoleIntroVisible(false);
       return;
     }
-    if (!online || room.round !== 1 || !room.word || roleIntroPlayedRef.current) return;
+    if (!online || !roleReady || room.round !== 1 || !room.word || roleIntroPlayedRef.current) return;
     roleIntroPlayedRef.current = true;
     setReveal(true);
     setRoleIntroVisible(true);
     const timer = window.setTimeout(() => setRoleIntroVisible(false), 2300);
     return () => window.clearTimeout(timer);
-  }, [online, room.id, room.status, room.round, room.word, setReveal]);
+  }, [online, roleReady, room.id, room.status, room.round, room.word, setReveal]);
   useEffect(() => {
     if (room.status === "voting" && !online) setLocalVoterId(voterId);
   }, [room.status, room.round, online, voterId]);
@@ -1195,7 +1298,8 @@ function Game({ room, userId, voterId, online, countdown, reveal, setReveal, pas
       if (nextVoter) setLocalVoterId(nextVoter.id);
     }
   };
-  return <div className={`game-page ${(online || passRoleReady) && isImpostor ? "impostor-screen" : ""}`}>{roleIntroVisible && <div className="role-intro-backdrop" aria-live="polite"><div className="role-intro-card"><span className="role-intro-mark">{isImpostor ? "👻" : "🔐"}</span><span className="role-intro-title">{isImpostor ? "YOU’RE THE IMPOSTOR" : "YOU’RE A CIVILIAN"}</span><b>{isImpostor ? room.hint : room.word}</b><small>{isImpostor ? "Your hint" : "The secret word"}</small></div></div>}<div className="game-top"><button className="back-link" onClick={onHome}><ArrowLeft size={15} /> Leave game</button><span className="game-round-tag">ROUND <b>{String(room.round).padStart(2, "0")}</b></span><span className="game-player-count"><Users size={14} /> {room.players.filter((player) => player.alive).length} ALIVE</span></div>
+  if (online && !roleReady) return <div className="game-page role-loading" role="status" aria-live="polite">Loading your private role…</div>;
+  return <div className={`game-page ${(online || passRoleReady) && isImpostor ? "impostor-screen" : ""}`}>{roleIntroVisible && <div className="role-intro-backdrop" aria-live="polite"><div className="role-intro-card"><span className="role-intro-mark">{isImpostor ? "👻" : "🔐"}</span><span className="role-intro-title">{isImpostor ? "YOU’RE THE IMPOSTOR" : "YOU’RE A CIVILIAN"}</span><b>{isImpostor ? room.hint : room.word}</b><small>{isImpostor ? "Your hint" : "The secret word"}</small></div></div>}<div className="game-top"><button className="back-link" onClick={onHome}><ArrowLeft size={15} /> Leave game</button>{onStop && <button className="stop-game-button" onClick={onStop}><X size={13} /> Stop game</button>}<span className="game-round-tag">ROUND <b>{String(room.round).padStart(2, "0")}</b></span><span className="game-player-count"><Users size={14} /> {room.players.filter((player) => player.alive).length} ALIVE</span></div>
     <div className="game-header"><span className="modal-kicker">{room.status === "playing" ? "CLUE ROUND" : room.status === "voting" ? "VOTING IS OPEN" : room.status === "ended" ? "GAME OVER" : "THE VOTE IS IN"}</span>
       <h1>{room.status === "playing" ? <>Say something.<br /><span>Don’t say too much.</span></> : room.status === "voting" ? <>Who’s the<br /><span>impostor?</span></> : room.status === "ended" ? <>The truth<br /><span>comes out.</span></> : <>The votes<br /><span>are in.</span></>}</h1>
       <p>{room.status === "playing" ? "One clue each. Keep it casual. Keep your eyes open." : room.status === "voting" ? "Choose carefully. Or vote to let everyone off the hook." : room.status === "ended" ? "Every bluff eventually has a tell." : "Here’s who got sent packing."}</p>
