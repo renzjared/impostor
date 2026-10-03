@@ -33,6 +33,12 @@ function normalizeRoomState(state: unknown, fallback: GameRoom | null = null): G
   if (!merged.id || !merged.name || !merged.hostId) return fallback;
   return {
     ...merged,
+    mode: merged.mode === "personal-devices" ? "personal-devices" : "pass-and-play",
+    status: ["lobby", "playing", "voting", "results", "ended"].includes(merged.status || "") ? merged.status! : "lobby",
+    round: typeof merged.round === "number" ? merged.round : 0,
+    turnIndex: typeof merged.turnIndex === "number" ? merged.turnIndex : 0,
+    impostorCount: typeof merged.impostorCount === "number" ? merged.impostorCount : 1,
+    voteSeconds: typeof merged.voteSeconds === "number" ? merged.voteSeconds : 30,
     players: Array.isArray(merged.players) ? merged.players : fallback?.players ?? [],
     packs: Array.isArray(merged.packs) ? merged.packs : fallback?.packs ?? [],
     turnOrder: Array.isArray(merged.turnOrder) ? merged.turnOrder : fallback?.turnOrder ?? [],
@@ -269,11 +275,11 @@ function App() {
         setProfileAvatarUrl(profile.avatarUrl);
         setName(displayName);
       }
-      setRoom((current) => current ? {
+      setRoom((current) => current ? normalizeRoomState({
         ...current,
         hostId: current.hostId === initialUserIdRef.current ? authId : current.hostId,
         players: current.players.map((player) => player.id === initialUserIdRef.current ? { ...player, id: authId } : player),
-      } : current);
+      }, current) : current);
       setUserId(authId);
       setDiscordConnected(isDiscordUser);
       setConnected(true);
@@ -330,15 +336,20 @@ function App() {
   }, [loadPublicRooms, connected]);
 
   const updateRoom = useCallback(async (next: GameRoom) => {
-    setRoom(next);
-    if (!supabase || next.mode !== "personal-devices") return;
-    const publicState: GameRoom = { ...next, word: undefined, hint: undefined, impostors: [] };
-    if (next.status === "ended") {
-      publicState.word = next.word;
-      publicState.hint = next.hint;
-      publicState.impostors = next.impostors;
+    const normalized = normalizeRoomState(next);
+    if (!normalized) {
+      notify("Could not update invalid game state.");
+      return;
     }
-    const { error } = await supabase.from("lobbies").update({ name: next.name, status: next.status, state: publicState }).eq("id", next.id);
+    setRoom(normalized);
+    if (!supabase || normalized.mode !== "personal-devices") return;
+    const publicState: GameRoom = { ...normalized, word: undefined, hint: undefined, impostors: [] };
+    if (normalized.status === "ended") {
+      publicState.word = normalized.word;
+      publicState.hint = normalized.hint;
+      publicState.impostors = normalized.impostors;
+    }
+    const { error } = await supabase.from("lobbies").update({ name: normalized.name, status: normalized.status, state: publicState }).eq("id", normalized.id);
     if (error) notify(`Could not sync the room: ${error.message}`);
   }, [notify]);
 
@@ -657,10 +668,45 @@ function App() {
     if (!room) return;
     const playerId = room.turnOrder[room.turnIndex];
     const clueText = playerId === userId || room.mode === "pass-and-play" ? clueInput.trim() : "";
-    const clues = skipped || !clueText ? room.clues : [...room.clues, { playerId, text: clueText.slice(0, 120), round: room.round }];
+    const submittedText = clueText.slice(0, 120);
+    const normalizedEntry = (entry: string) => entry.normalize("NFKC").trim().replace(/\s+/g, " ").toLowerCase();
+    if (!skipped && submittedText && room.clues.some((clue) => normalizedEntry(clue.text) === normalizedEntry(submittedText))) {
+      notify("That clue has already been used. Try a different one.");
+      return;
+    }
+    if (room.mode === "personal-devices" && supabase) {
+      const { data, error } = await supabase.rpc("submit_lobby_clue", {
+        p_lobby_id: room.id, p_clue: skipped ? null : submittedText, p_skip: skipped || !submittedText,
+      });
+      if (error || !data) {
+        notify(error?.message || "Could not submit your clue.");
+        return;
+      }
+      const row = Array.isArray(data) ? data[0] : data;
+      const updated = normalizeRoomState({ ...(row.state as object), id: row.id, code: row.code, name: row.name }, room);
+      if (!updated) {
+        notify("The lobby returned invalid game data. Please refresh and try again.");
+        return;
+      }
+      setRoom(updated);
+      setClueInput("");
+      setPassTurnReady(false);
+      audio.cue(updated.status === "ended" ? "win" : "clue");
+      if (updated.status === "voting") setCountdown(updated.voteSeconds);
+      return;
+    }
+    const clues = skipped || !submittedText ? room.clues : [...room.clues, { playerId, text: submittedText, round: room.round }];
     const nextIndex = room.turnIndex + 1;
+    const impostorSolvedWord = !skipped && Boolean(submittedText)
+      && room.impostors.includes(playerId)
+      && normalizedEntry(submittedText) === normalizedEntry(room.word || "");
     setClueInput("");
     setPassTurnReady(false);
+    if (impostorSolvedWord) {
+      await updateRoom({ ...room, clues, status: "ended", winner: "impostor" });
+      audio.cue("win");
+      return;
+    }
     audio.cue("clue");
     if (nextIndex >= room.turnOrder.length) {
       await updateRoom({ ...room, clues, status: "voting", votes: {} });
@@ -693,16 +739,17 @@ function App() {
   };
 
   const resolveVote = async (current = room, alreadyLocked = false) => {
-    if (!current) return;
-    if (current.mode === "personal-devices" && supabase && current.hostId === userId) {
+    const normalizedCurrent = normalizeRoomState(current);
+    if (!normalizedCurrent) return;
+    if (normalizedCurrent.mode === "personal-devices" && supabase && normalizedCurrent.hostId === userId) {
       if (resolvingVoteRef.current && !alreadyLocked) return;
       resolvingVoteRef.current = true;
-      const { data, error } = await supabase.rpc("resolve_lobby_vote", { p_lobby_id: current.id });
+      const { data, error } = await supabase.rpc("resolve_lobby_vote", { p_lobby_id: normalizedCurrent.id });
       if (error || !data) {
         const { data: latest, error: refreshError } = await supabase.from("lobbies")
-          .select("id, code, name, state, status").eq("id", current.id).maybeSingle();
+          .select("id, code, name, state, status").eq("id", normalizedCurrent.id).maybeSingle();
         if (!refreshError && latest && latest.status !== "voting") {
-          setRoom(normalizeRoomState({ ...(latest.state as object), id: latest.id, code: latest.code, name: latest.name }, current));
+          setRoom(normalizeRoomState({ ...(latest.state as object), id: latest.id, code: latest.code, name: latest.name }, normalizedCurrent));
           setScreen("game");
           resolvingVoteRef.current = false;
           return;
@@ -712,22 +759,22 @@ function App() {
         return;
       }
       const row = Array.isArray(data) ? data[0] : data;
-      setRoom(normalizeRoomState({ ...(row.state as object), id: row.id, code: row.code, name: row.name }, current));
+      setRoom(normalizeRoomState({ ...(row.state as object), id: row.id, code: row.code, name: row.name }, normalizedCurrent));
       setScreen("game");
       resolvingVoteRef.current = false;
       return;
     }
-    const counts = Object.values(current.votes).reduce<Record<string, number>>((acc, vote) => ({ ...acc, [vote]: (acc[vote] || 0) + 1 }), {});
+    const counts = Object.values(normalizedCurrent.votes).reduce<Record<string, number>>((acc, vote) => ({ ...acc, [vote]: (acc[vote] || 0) + 1 }), {});
     const max = Math.max(0, ...Object.values(counts));
     const winners = Object.keys(counts).filter((key) => counts[key] === max);
     const eliminatedId = winners.length === 1 && winners[0] !== "skip" ? winners[0] : undefined;
-    const eliminatedWasImpostor = eliminatedId ? current.impostors.includes(eliminatedId) : undefined;
-    const players = eliminatedId ? current.players.map((player) => player.id === eliminatedId ? { ...player, alive: false } : player) : current.players;
-    const impostorAlive = current.impostors.filter((id) => players.some((player) => player.id === id && player.alive)).length;
-    const civilianAlive = players.filter((player) => player.alive && !current.impostors.includes(player.id)).length;
+    const eliminatedWasImpostor = eliminatedId ? normalizedCurrent.impostors.includes(eliminatedId) : undefined;
+    const players = eliminatedId ? normalizedCurrent.players.map((player) => player.id === eliminatedId ? { ...player, alive: false } : player) : normalizedCurrent.players;
+    const impostorAlive = normalizedCurrent.impostors.filter((id) => players.some((player) => player.id === id && player.alive)).length;
+    const civilianAlive = players.filter((player) => player.alive && !normalizedCurrent.impostors.includes(player.id)).length;
     const winner = impostorAlive === 0 ? "civilians" as const : impostorAlive >= civilianAlive ? "impostor" as const : undefined;
     const voteOutcome = eliminatedId ? "eliminated" : Object.keys(counts).length === 0 ? "no-votes" : winners.length > 1 ? "tie" : "skip";
-    await updateRoom({ ...current, players, eliminatedId, eliminatedWasImpostor, voteCounts: counts, voteOutcome, remainingImpostors: impostorAlive, winner, status: winner ? "ended" : "results" });
+    await updateRoom({ ...normalizedCurrent, players, eliminatedId, eliminatedWasImpostor, voteCounts: counts, voteOutcome, remainingImpostors: impostorAlive, winner, status: winner ? "ended" : "results" });
     setScreen("game");
   };
 
@@ -875,9 +922,23 @@ function App() {
           passTurnReady={passTurnReady} onPassTurnReady={() => setPassTurnReady(true)} onRematch={() => void startRematch()} onRevealRole={() => audio.cue("reveal")}
           clueInput={clueInput} setClueInput={setClueInput} onSubmit={() => void submitClue()}
           onVote={castVote} onNext={() => void nextRound()} canAdvance={!supabase || room.hostId === userId} onHome={leaveRoom}
-          onGuess={(guess, guesserId) => {
-            if (!room || !room.impostors.includes(supabase ? userId : guesserId)) return;
-            const correct = guess.trim().toLowerCase() === room.word?.toLowerCase();
+          onGuess={async (guess, guesserId) => {
+            if (!room || room.mode === "pass-and-play" && !room.impostors.includes(guesserId)) return;
+            if (room.mode === "personal-devices" && supabase) {
+              const { data, error } = await supabase.rpc("submit_impostor_guess", { p_lobby_id: room.id, p_guess: guess });
+              if (error || !data) {
+                notify(error?.message || "Could not submit your guess.");
+                return;
+              }
+              const row = Array.isArray(data) ? data[0] : data;
+              const updated = normalizeRoomState({ ...(row.state as object), id: row.id, code: row.code, name: row.name }, room);
+              if (updated) {
+                setRoom(updated);
+                audio.cue("win");
+              }
+              return;
+            }
+            const correct = guess.trim().normalize("NFKC").toLowerCase() === room.word?.trim().normalize("NFKC").toLowerCase();
             if (correct) {
               void updateRoom({ ...room, status: "ended", winner: "impostor" });
               audio.cue("win");
@@ -1064,14 +1125,15 @@ function Game({ room, userId, voterId, online, countdown, reveal, setReveal, pas
   room: GameRoom; userId: string; voterId: string; online: boolean; countdown: number; reveal: boolean; setReveal: (reveal: boolean) => void;
   passTurnReady: boolean; onPassTurnReady: () => void; onRematch: () => void; onRevealRole: () => void; canAdvance: boolean;
   clueInput: string; setClueInput: (clue: string) => void;
-  onSubmit: () => void; onVote: (id: string, voterId: string) => Promise<boolean>; onNext: () => void; onHome: () => void; onGuess: (guess: string, guesserId: string) => void;
+  onSubmit: () => void; onVote: (id: string, voterId: string) => Promise<boolean>; onNext: () => void; onHome: () => void; onGuess: (guess: string, guesserId: string) => void | Promise<void>;
 }) {
   const currentId = room.turnOrder[room.turnIndex];
   const currentPlayer = room.players.find((player) => player.id === currentId);
   const isTurn = !online || currentId === userId;
   const isAlive = room.players.some((player) => player.id === userId && player.alive);
   const roleId = online ? userId : currentId;
-  const isImpostor = room.impostors.includes(roleId);
+  const impostorIds = Array.isArray(room.impostors) ? room.impostors : [];
+  const isImpostor = impostorIds.includes(roleId);
   const [guess, setGuess] = useState("");
   const [showGuess, setShowGuess] = useState(false);
   const [readyTurnKey, setReadyTurnKey] = useState("");
@@ -1079,7 +1141,7 @@ function Game({ room, userId, voterId, online, countdown, reveal, setReveal, pas
   const [onlineVote, setOnlineVote] = useState<string>();
   const [roleIntroVisible, setRoleIntroVisible] = useState(false);
   const roleIntroPlayedRef = useRef(false);
-  const [guesserId, setGuesserId] = useState(room.impostors[0] || userId);
+  const [guesserId, setGuesserId] = useState(impostorIds[0] || userId);
   const turnKey = `${room.round}:${room.turnIndex}`;
   const passRoleReady = readyTurnKey === turnKey;
   const activeVoterId = online ? voterId : localVoterId;
@@ -1116,15 +1178,15 @@ function Game({ room, userId, voterId, online, countdown, reveal, setReveal, pas
     return () => window.clearTimeout(timer);
   }, [reveal, setReveal]);
   useEffect(() => {
-    if (room.status === "results" && room.impostors.length && !room.players.some((player) => player.id === guesserId && player.alive)) {
-      setGuesserId(room.impostors.find((id) => room.players.some((player) => player.id === id && player.alive)) || room.impostors[0]!);
+    if (room.status === "results" && impostorIds.length && !room.players.some((player) => player.id === guesserId && player.alive)) {
+      setGuesserId(impostorIds.find((id) => room.players.some((player) => player.id === id && player.alive)) || impostorIds[0]!);
     }
-  }, [room.status, room.impostors, room.players, guesserId]);
+  }, [room.status, impostorIds, room.players, guesserId]);
   const clueRounds = room.clues.reduce<Record<string, typeof room.clues>>((groups, clue) => ({ ...groups, [clue.round]: [...(groups[clue.round] || []), clue] }), {});
   const playerClues = (playerId: string) => room.clues.filter((clue) => clue.playerId === playerId).map((clue, index) => <span className="player-clue-block" key={`${clue.round}-${index}`}>{clue.text}</span>);
   const votesComplete = votedCount >= room.players.filter((player) => player.alive).length;
   const canChangeVote = canVote && !votesComplete && countdown > 0;
-  const remainingImpostorCount = room.remainingImpostors ?? room.impostors.filter((id) => room.players.some((player) => player.id === id && player.alive)).length;
+  const remainingImpostorCount = room.remainingImpostors ?? impostorIds.filter((id) => room.players.some((player) => player.id === id && player.alive)).length;
   const submitVote = async (choice: string) => {
     const accepted = await onVote(choice, activeVoterId);
     if (!accepted) return;
@@ -1155,8 +1217,8 @@ function Game({ room, userId, voterId, online, countdown, reveal, setReveal, pas
       <div className="vote-options">{room.players.filter((player) => player.alive).map((player) => <button disabled={!canChangeVote} className={`vote-option vote-option-with-clues ${selectedVote === player.id ? "selected-vote" : ""}`} key={player.id} onClick={() => void submitVote(player.id)}><span className="player-avatar">{player.avatarUrl ? <img src={player.avatarUrl} alt="" referrerPolicy="no-referrer" /> : player.avatar}</span><span className="vote-player-details"><b>{player.name}{player.id === activeVoterId ? " (you)" : ""}</b><span className="player-clue-blocks">{playerClues(player.id)}</span></span>{selectedVote === player.id && <span className="selected-vote-flag"><Check size={12} /> YOUR VOTE</span>}{room.votes[player.id] && <span className="voted-indicator"><Check size={12} /> VOTED</span>}<Vote size={16} /></button>)}</div>
       <div className="vote-bottom"><button className={`skip-vote ${selectedVote === "skip" ? "selected-vote" : ""}`} onClick={() => void submitVote("skip")} disabled={!canChangeVote}><ArrowDownLeft size={15} /> Skip this vote{selectedVote === "skip" && <span className="selected-vote-flag"><Check size={12} /> YOUR VOTE</span>}</button><span>{votedCount}/{room.players.filter((player) => player.alive).length} VOTES IN{voted && " · YOUR VOTE IS IN"}</span></div>
     </section>}
-    {room.status === "results" && <section className="results-panel panel round-results vote-result-arrive"><div className="result-emoji">{room.voteOutcome === "eliminated" ? "🗳️" : room.voteOutcome === "no-votes" ? "⏳" : "🤝"}</div><h2>{room.eliminatedId ? `${room.players.find((player) => player.id === room.eliminatedId)?.name} was evicted.` : room.voteOutcome === "tie" ? "It’s a tie." : room.voteOutcome === "no-votes" ? "No one voted." : "The vote was skipped."}</h2><p>{room.eliminatedId ? room.eliminatedWasImpostor ? "The group caught an impostor. The secret stays secret until all impostors are out." : "A civilian was evicted. The impostor is still among you." : room.voteOutcome === "tie" ? "The top choices received the same number of votes. Nobody is evicted." : room.voteOutcome === "no-votes" ? "The voting timer ran out before any votes were submitted." : "Nobody was evicted this round."}</p><VoteTally room={room} /><div className="remaining-impostors">{remainingImpostorCount} impostor{remainingImpostorCount === 1 ? "" : "s"} remain</div>{canGuess && <div className="guess-inline">{!online && <label className="guesser-picker">HAND THE PHONE TO AN IMPOSTOR<select value={guesserId} onChange={(event) => setGuesserId(event.target.value)}>{room.impostors.filter((id) => room.players.some((player) => player.id === id && player.alive)).map((id) => <option key={id} value={id}>{room.players.find((player) => player.id === id)?.name}</option>)}</select></label>}<button className="text-link" onClick={() => setShowGuess(!showGuess)}>Impostor: guess the secret word to win <ArrowRight size={14} /></button>{showGuess && <form onSubmit={(event) => { event.preventDefault(); onGuess(guess, guesserId); setGuess(""); setShowGuess(false); }}><input value={guess} onChange={(event) => setGuess(event.target.value)} placeholder="Your guess..." /><button className="button-primary">Guess</button></form>}</div>}{canAdvance ? <button className="button-primary result-continue" onClick={onNext}>Continue with the same word <ArrowRight size={16} /></button> : <p className="host-waiting">Waiting for the host to start the next round.</p>}</section>}
-    {room.status === "ended" && <section className={`results-panel game-over panel winner-${room.winner}`}><div className="winner-glow" /><div className="result-emoji">{room.winner === "impostor" ? "👻" : "🎉"}</div><h2>{room.winner === "impostor" ? "Impostors win!" : "Civilians win!"}</h2><p>{room.winner === "impostor" ? "The impostor side survived the votes — or guessed the secret word." : "Every impostor was found out. The civilians take the win."}</p>{room.voteCounts && <><div className="vote-outcome-callout">{room.eliminatedId ? `${room.players.find((player) => player.id === room.eliminatedId)?.name} was evicted.` : room.voteOutcome === "tie" ? "The vote ended in a tie." : room.voteOutcome === "no-votes" ? "No one voted." : "The vote was skipped."}</div><VoteTally room={room} /><div className="remaining-impostors">{room.remainingImpostors ?? 0} impostors remain</div></>}<div className="winner-reveal">{room.impostors.map((id) => { const player = room.players.find((entry) => entry.id === id); return <div key={id}><span>{player?.avatarUrl ? <img src={player.avatarUrl} alt="" referrerPolicy="no-referrer" /> : player?.avatar}</span><span><small>IMPOSTOR</small><b>{player?.name}</b></span><Ghost size={17} /></div>; })}</div><div className="result-word"><span>THE SECRET WORD</span><b>{room.word}</b></div><div className="winner-actions">{(!online || room.hostId === userId) && <button className="button-primary" onClick={onRematch}>New game in this lobby <ArrowRight size={16} /></button>}<button className="button-secondary" onClick={onHome}>Back to home</button></div></section>}
+    {room.status === "results" && <section className="results-panel panel round-results vote-result-arrive"><div className="result-emoji">{room.voteOutcome === "eliminated" ? "🗳️" : room.voteOutcome === "no-votes" ? "⏳" : "🤝"}</div><h2>{room.eliminatedId ? `${room.players.find((player) => player.id === room.eliminatedId)?.name} was evicted.` : room.voteOutcome === "tie" ? "It’s a tie." : room.voteOutcome === "no-votes" ? "No one voted." : "The vote was skipped."}</h2><p>{room.eliminatedId ? room.eliminatedWasImpostor ? "The group caught an impostor. The secret stays secret until all impostors are out." : "A civilian was evicted. The impostor is still among you." : room.voteOutcome === "tie" ? "The top choices received the same number of votes. Nobody is evicted." : room.voteOutcome === "no-votes" ? "The voting timer ran out before any votes were submitted." : "Nobody was evicted this round."}</p><VoteTally room={room} /><div className="remaining-impostors">{remainingImpostorCount} impostor{remainingImpostorCount === 1 ? "" : "s"} remain</div>{canGuess && <div className="guess-inline">{!online && <label className="guesser-picker">HAND THE PHONE TO AN IMPOSTOR<select value={guesserId} onChange={(event) => setGuesserId(event.target.value)}>{impostorIds.filter((id) => room.players.some((player) => player.id === id && player.alive)).map((id) => <option key={id} value={id}>{room.players.find((player) => player.id === id)?.name}</option>)}</select></label>}<button className="text-link" onClick={() => setShowGuess(!showGuess)}>Impostor: guess the secret word to win <ArrowRight size={14} /></button>{showGuess && <form onSubmit={(event) => { event.preventDefault(); void onGuess(guess, guesserId); setGuess(""); setShowGuess(false); }}><input value={guess} onChange={(event) => setGuess(event.target.value)} placeholder="Your guess..." /><button className="button-primary">Guess</button></form>}</div>}{canAdvance ? <button className="button-primary result-continue" onClick={onNext}>Continue with the same word <ArrowRight size={16} /></button> : <p className="host-waiting">Waiting for the host to start the next round.</p>}</section>}
+    {room.status === "ended" && <section className={`results-panel game-over panel winner-${room.winner}`}><div className="winner-glow" /><div className="result-emoji">{room.winner === "impostor" ? "👻" : "🎉"}</div><h2>{room.winner === "impostor" ? "Impostors win!" : "Civilians win!"}</h2><p>{room.winner === "impostor" ? "The impostor side survived the votes — or guessed the secret word." : "Every impostor was found out. The civilians take the win."}</p>{room.voteCounts && <><div className="vote-outcome-callout">{room.eliminatedId ? `${room.players.find((player) => player.id === room.eliminatedId)?.name} was evicted.` : room.voteOutcome === "tie" ? "The vote ended in a tie." : room.voteOutcome === "no-votes" ? "No one voted." : "The vote was skipped."}</div><VoteTally room={room} /><div className="remaining-impostors">{room.remainingImpostors ?? 0} impostors remain</div></>}<div className="winner-reveal">{impostorIds.map((id) => { const player = room.players.find((entry) => entry.id === id); return <div key={id}><span>{player?.avatarUrl ? <img src={player.avatarUrl} alt="" referrerPolicy="no-referrer" /> : player?.avatar}</span><span><small>IMPOSTOR</small><b>{player?.name}</b></span><Ghost size={17} /></div>; })}</div><div className="result-word"><span>THE SECRET WORD</span><b>{room.word}</b></div><div className="winner-actions">{(!online || room.hostId === userId) && <button className="button-primary" onClick={onRematch}>New game in this lobby <ArrowRight size={16} /></button>}<button className="button-secondary" onClick={onHome}>Back to home</button></div></section>}
     {room.status === "playing" && !online && !passRoleReady && <div className="pass-screen"><section className={`pass-reveal-card ${reveal ? "revealing" : ""}`}><span className="modal-kicker">PASS THE DEVICE</span><div className="pass-player-avatar">{currentPlayer?.avatarUrl ? <img src={currentPlayer.avatarUrl} alt="" referrerPolicy="no-referrer" /> : currentPlayer?.avatar}</div><h2>{reveal ? "Your secret role" : `Pass to ${currentPlayer?.name}`}</h2><p>{reveal ? "Keep this to yourself. Don't let anyone else see the screen." : "Make sure only this player is looking before they reveal their role."}</p>{reveal && <div className="pass-secret"><b>{isImpostor ? "YOU’RE THE IMPOSTOR" : room.word}</b><span>{isImpostor ? `Your hint: ${room.hint}` : "You are a civilian. Protect the word."}</span></div>}<button className="button-primary" onClick={() => { if (!reveal) { onRevealRole(); setReveal(true); } else { setReveal(false); setReadyTurnKey(turnKey); onPassTurnReady(); } }}>{reveal ? "Hide my role & start turn" : "Tap to reveal my role"} <Eye size={15} /></button></section></div>}
   </div>;
 }
