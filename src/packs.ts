@@ -423,32 +423,32 @@ Unfiltered vlog|Casual|Daily life|Camera
 Minimalist phone|Apps|Simple|Focus
 Collectible blind box|Surprise|Toy|Unboxing
 `),
-  makePack("memes", "Memes", "Relatable internet humor, no specific quotes needed", "😂", "peach", `
-Reaction image|Face|Reply|Expression
-Doge|Shiba inu|Caption|Internet dog
-Distracted moment|Attention|Choice|Side glance
-Expectation versus reality|Plan|Outcome|Comparison
-Surprised cat|Feline|Wide eyes|Reaction
-Two-button dilemma|Choice|Sweat|Decision
-Awkward penguin|Walk|Lonely|Antarctica
-Keyboard smash|Typing|Chaos|Letters
-Out-of-context screenshot|Message|Confusing|Share
-Low-resolution image|Pixelated|Blurry|Compression
-Relatable comic|Everyday|Panels|Punchline
-Overthinking meme|Thoughts|Anxiety|Loop
-Wholesome meme|Cute|Kindness|Smile
-Pun image|Wordplay|Caption|Groan
-Before-and-after|Change|Comparison|Transformation
-Pet side-eye|Dog|Judgment|Expression
-Dramatic zoom|Camera|Reaction|Emphasis
-Tiny versus huge|Scale|Comparison|Difference
-Loading brain|Thought|Buffering|Confusion
-Chaotic group chat|Messages|Friends|Notifications
-Mood board|Pictures|Vibe|Collection
-Screenshot humor|Text|Context|Share
-Unexpected ending|Setup|Twist|Punchline
-Looping clip|Repeat|Short video|Seamless
-Meme page|Feed|Captions|Scrolling
+  makePack("memes", "Memes", "Fresh slang, game chaos, and current internet bits", "😂", "peach", `
+Six-seven|Number|Hand motion|Basketball edit
+Fortnite|Battle royale|Skins|Victory Royale
+Rizz|Charm|Flirting|Aura
+Brainrot|Online slang|Absurd|Chronically scrolling
+Skibidi Toilet|Singing head|Bathroom|Surreal series
+Fanum tax|Snack|Stealing a bite|Streamer slang
+Sigma|Alleged lone wolf|Edit|Grindset
+Aura points|Vibe|Score|Cool factor
+Looksmaxxing|Appearance|Glow-up|Online trend
+Mewing|Jawline|Tongue posture|Silent pose
+Locked in|Focus|Serious mode|No distractions
+Cooked|In trouble|Finished|No comeback
+Let him cook|Wait|Idea|Potential
+Chat, is this real?|Livestream|Audience|Disbelief
+NPC livestream|Looping gestures|Chat gifts|Robot-like
+Emote spam|Dance|Game lobby|Repeat
+Default dance|Fortnite|Celebration|Familiar moves
+Victory Royale|Fortnite|Last player|Win screen
+Fortnite OG|Battle bus|Throwback map|Old-school drop
+Fortnite Festival|Rhythm game|Songs|Stage
+Lego Fortnite|Bricks|Survival|Crafting
+Peter Griffin Fortnite|Suit|Chicken fight|Game skin
+Low taper fade|Haircut|Barber|Viral edit
+Brainrot slang|Made-up words|Fast edits|Nonsense
+Rizzler|Charm|Nicknamed person|Over-the-top confidence
 `),
 ];
 
