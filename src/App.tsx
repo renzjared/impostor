@@ -540,6 +540,40 @@ function App() {
     void updateRoom({ ...room, players: room.players.map((player) => player.id === userId ? { ...player, ready: !player.ready } : player) });
   };
 
+  const leaveLobby = async () => {
+    if (!room) return;
+    const activeRoom = room;
+    const isHost = activeRoom.hostId === userId;
+    if (isHost && activeRoom.mode === "personal-devices" && !window.confirm(activeRoom.players.length > 1
+      ? "Leave this lobby? Host controls will pass to another player."
+      : "Leave this lobby? Since you’re the only player, the lobby will be deleted.")) return;
+    if (supabase && activeRoom.mode === "personal-devices") {
+      const { error } = await supabase.rpc("leave_lobby", { p_lobby_id: activeRoom.id });
+      if (error) {
+        notify(`Could not leave the lobby: ${error.message}`);
+        return;
+      }
+    }
+    leaveRoom();
+  };
+
+  const kickPlayer = async (playerId: string) => {
+    if (!room || room.hostId !== userId || playerId === userId) return;
+    const target = room.players.find((player) => player.id === playerId);
+    if (!target || !window.confirm(`Kick ${target.name} from this lobby?`)) return;
+    if (supabase && room.mode === "personal-devices") {
+      const { data, error } = await supabase.rpc("kick_lobby_player", { p_lobby_id: room.id, p_player_id: playerId });
+      if (error) {
+        notify(`Could not kick ${target.name}: ${error.message}`);
+        return;
+      }
+      const row = Array.isArray(data) ? data[0] : data;
+      if (row) setRoom({ ...(row.state as GameRoom), id: row.id, code: row.code, name: row.name });
+    } else {
+      await updateRoom({ ...room, players: room.players.filter((player) => player.id !== playerId) });
+    }
+  };
+
   const startGame = async () => {
     if (!room) return;
     if (room.players.length < 3) { notify("Gather at least 3 players to start."); return; }
@@ -552,10 +586,11 @@ function App() {
     const players = room.players.map((player) => ({ ...player, alive: true }));
     const turnOrder = shuffled(players.map((player) => player.id));
     if (supabase && room.mode === "personal-devices") {
-      const { error: roleError } = await supabase.from("lobby_roles").upsert(players.map((player) => ({
-        lobby_id: room.id, player_id: player.id, is_impostor: impostors.includes(player.id), word: selected.word,
+      const roles = players.map((player) => ({
+        player_id: player.id, is_impostor: impostors.includes(player.id), word: selected.word,
         hint: impostors.includes(player.id) ? selected.hints[Math.floor(Math.random() * selected.hints.length)]! : "",
-      })), { onConflict: "lobby_id,player_id" });
+      }));
+      const { error: roleError } = await supabase.rpc("assign_lobby_roles", { p_lobby_id: room.id, p_roles: roles });
       if (roleError) { notify(`Could not assign player roles: ${roleError.message}`); return; }
     }
     await updateRoom({
@@ -697,6 +732,27 @@ function App() {
     setModal(null);
   };
 
+  useEffect(() => {
+    const client = supabase;
+    if (!client || !room || room.mode !== "personal-devices" || room.status !== "lobby") return;
+    const lobbyId = room.id;
+    const timer = window.setInterval(() => {
+      void client.from("lobbies").select("state").eq("id", lobbyId).maybeSingle().then(({ data, error }) => {
+        if (error) {
+          notify(`Could not check lobby membership: ${error.message}`);
+          return;
+        }
+        const members = data?.state?.players;
+        if (!Array.isArray(members) || !members.some((player: Player) => player.id === userId)) {
+          setRoom((current) => current?.id === lobbyId ? null : current);
+          setScreen((current) => current === "lobby" ? "home" : current);
+          notify("You’re no longer in this lobby.");
+        }
+      });
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [room?.id, room?.mode, room?.status, userId, notify]);
+
   const connectDiscord = async () => {
     if (!supabase) { notify("Configure Supabase to connect a Discord account."); return; }
     const { error } = await supabase.auth.signInWithOAuth({
@@ -771,7 +827,7 @@ function App() {
           onJoinCode={joinRoom} onRules={() => setModal("rules")} onPacks={() => setScreen("packs")}
         />}
         {screen === "lobby" && room && <Lobby room={room} userId={userId} packs={allPacks} online={room.mode === "personal-devices"}
-          onBack={leaveRoom} onReady={toggleReady} onStart={startGame} onAddPlayer={() => setModal("addPlayer")}
+          onBack={() => void leaveLobby()} onReady={toggleReady} onStart={startGame} onAddPlayer={() => setModal("addPlayer")} onKick={(playerId) => void kickPlayer(playerId)}
           onCopy={() => void copyInvite()}
           onPacks={(ids) => void updateRoom({ ...room, packs: ids })}
           onSettings={(key, value) => void updateRoom({ ...room, [key]: value })}
@@ -919,8 +975,8 @@ function JoinDialog({ initialCode, onCancel, onJoin, name, setName }: { initialC
   </>;
 }
 
-function Lobby({ room, userId, packs, online, onBack, onReady, onStart, onAddPlayer, onCopy, onPacks, onSettings }: {
-  room: GameRoom; userId: string; packs: Pack[]; online: boolean; onBack: () => void; onReady: () => void; onStart: () => void; onAddPlayer: () => void;
+function Lobby({ room, userId, packs, online, onBack, onReady, onStart, onAddPlayer, onKick, onCopy, onPacks, onSettings }: {
+  room: GameRoom; userId: string; packs: Pack[]; online: boolean; onBack: () => void; onReady: () => void; onStart: () => void; onAddPlayer: () => void; onKick: (playerId: string) => void;
   onCopy: () => void; onPacks: (ids: string[]) => void; onSettings: (key: "impostorCount" | "voteSeconds", value: number) => void;
 }) {
   const isHost = room.hostId === userId;
@@ -930,12 +986,12 @@ function Lobby({ room, userId, packs, online, onBack, onReady, onStart, onAddPla
     <div className="lobby-title-row"><div><span className="modal-kicker">{room.isPublic ? "PUBLIC ROOM" : "PRIVATE ROOM"} · {room.mode === "pass-and-play" ? "ONE DEVICE" : "PERSONAL DEVICES"}</span><h1>{room.name}</h1><p>{room.mode === "pass-and-play" ? "Add your friends, then pass the device around." : "Waiting for the crew. Everyone plays on their own device."}</p></div>{room.mode === "personal-devices" && <span className="room-code-badge">ROOM CODE <b>{room.code}</b><button title="Copy invite link" onClick={onCopy}><Copy size={14} /></button></span>}</div>
     <div className="lobby-layout"><section className="lobby-main panel">
       <div className="panel-heading"><div><h2>Players <span>{room.players.length}/12</span></h2></div><span className="waiting-badge">WAITING FOR PLAYERS</span></div>
-      <div className="player-grid">{room.players.map((player, i) => <div key={player.id} className={`player-tile ${player.id === userId ? "is-you" : ""}`}><span className={`player-avatar player-color-${i % 6}`}>{player.avatarUrl ? <img src={player.avatarUrl} alt="" referrerPolicy="no-referrer" /> : player.avatar}</span><span className="player-name">{player.name}{player.id === userId && <small>YOU</small>}</span>{player.id === room.hostId ? <Crown size={14} className="host-crown" /> : <span className={`ready-indicator ${player.ready ? "is-ready" : ""}`} />}</div>)}
+      <div className="player-grid">{room.players.map((player, i) => <div key={player.id} className={`player-tile ${player.id === userId ? "is-you" : ""}`}><span className={`player-avatar player-color-${i % 6}`}>{player.avatarUrl ? <img src={player.avatarUrl} alt="" referrerPolicy="no-referrer" /> : player.avatar}</span><span className="player-name">{player.name}{player.id === userId && <small>YOU</small>}</span>{player.id === room.hostId ? <Crown size={14} className="host-crown" /> : <span className={`ready-indicator ${player.ready ? "is-ready" : ""}`} />}{isHost && player.id !== userId && <button className="kick-player-button" title={`Kick ${player.name}`} aria-label={`Kick ${player.name}`} onClick={() => onKick(player.id)}><X size={14} /></button>}</div>)}
         {room.players.length < 12 && !online && <button className="player-tile add-player-tile" onClick={onAddPlayer}><span className="add-player-icon"><Plus size={19} /></span><span className="player-name">Add player</span></button>}
         {room.players.length < 3 && Array.from({ length: 3 - room.players.length }, (_, i) => <div className="player-tile waiting-tile" key={`waiting-${i}`}><span className="player-avatar waiting-avatar"><Users size={17} /></span><span className="player-name">Waiting for someone...</span><span className="ready-indicator" /></div>)}
       </div>
       {online ? <div className="lobby-invite"><span className="invite-icon"><Link2 size={17} /></span><span><b>Know someone who’d be suspicious?</b><small>Share the invite link. Anyone with it can join.</small></span><button className="button-secondary" onClick={onCopy}>Copy invite link <Copy size={14} /></button></div> : <div className="lobby-invite"><span className="invite-icon"><LockKeyhole size={17} /></span><span><b>One device, one secret at a time.</b><small>Before every turn, pass the screen to the named player to reveal their role privately.</small></span></div>}
-      <div className="lobby-bottom"><button className={`ready-button ${me?.ready ? "ready" : ""}`} onClick={onReady}><Check size={16} /> {me?.ready ? "You’re ready" : "I’m ready"}</button>
+      <div className="lobby-bottom"><div className="lobby-player-actions"><button className={`ready-button ${me?.ready ? "ready" : ""}`} onClick={onReady}><Check size={16} /> {me?.ready ? "You’re ready" : "I’m ready"}</button><button className="leave-lobby-button" onClick={onBack}><ArrowLeft size={14} /> Leave lobby</button></div>
         {isHost ? <button className="button-primary start-button" disabled={room.players.length < 3} onClick={onStart}>Start the game <ArrowRight size={16} /></button> : <span className="host-start-hint">Host will start the game</span>}
       </div>
     </section>

@@ -149,6 +149,11 @@ button:disabled { cursor: not-allowed !important; opacity: .45; }
 .voter-clue-summary { min-height: 49px; margin-bottom: 8px; padding: 8px; display: flex; align-items: center; gap: 9px; border: 1px solid #34352d; background: #191a16; }
 .local-voter-picker { display: flex; align-items: center; gap: 8px; margin: 10px 0; color: #a6a796; font: 8px var(--mono); }
 .local-voter-picker select { max-width: 220px; border: 1px solid #454735; background: #1b1d16; color: var(--cream); padding: 6px 8px; font-size: 9px; }
+.lobby-player-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.leave-lobby-button { min-height: 36px; display: flex; align-items: center; gap: 6px; border: 1px solid #493438; background: transparent; color: #d79a9c; padding: 0 9px; font-size: 9px; cursor: pointer; }
+.leave-lobby-button:hover { border-color: #8c454c; background: #2a1b1e; color: #ffb2b5; }
+.kick-player-button { width: 25px; height: 25px; flex: 0 0 25px; display: grid; place-items: center; border: 1px solid #493438; background: transparent; color: #c38286; cursor: pointer; }
+.kick-player-button:hover { border-color: #a64d56; background: #382025; color: #ffb2b5; }
 .voted-indicator { display: inline-flex; align-items: center; gap: 3px; padding: 4px 5px; border: 1px solid #56603a; color: #cce681; font: 7px var(--mono); white-space: nowrap; }
 .vote-result-arrive { animation: vote-result-arrive .5s cubic-bezier(.16,1,.3,1) both; }
 .vote-tally { margin: 16px 0 10px; padding: 12px; border: 1px solid #38392f; background: #151611; text-align: left; }
