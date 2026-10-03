@@ -112,6 +112,41 @@ button:disabled { cursor: not-allowed !important; opacity: .45; }
 .clue-history-row > span:first-child { width: 18px; height: 18px; flex: 0 0 18px; display: grid; place-items: center; overflow: hidden; border-radius: 50%; }
 .turn-order-row > span:nth-child(2) { width: 18px; height: 18px; flex: 0 0 18px; display: grid; place-items: center; overflow: hidden; border-radius: 50%; }
 .turn-order-row > span:nth-child(2) img { width: 100%; height: 100%; object-fit: cover; }
+.winner-reveal { grid-template-columns: minmax(0, 1fr); max-width: 250px; margin: 18px auto; }
+.winner-reveal > div { min-height: 190px; flex-direction: column; justify-content: center; gap: 8px; text-align: center; padding: 13px; }
+.winner-reveal > div > span:first-child { width: 112px; height: 112px; display: grid; place-items: center; overflow: hidden; border: 1px solid #4a4c39; background: #191a16; border-radius: 3px; font-size: 70px; }
+.winner-reveal > div > span:nth-child(2) { flex: initial; gap: 5px; }
+.winner-reveal small { font-size: 8px; letter-spacing: 1px; }
+.winner-reveal b { font-size: 13px; }
+.winner-reveal svg { display: none; }
+.secret-card { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 9px; }
+.secret-card .secret-word { margin: 11px 0 0; font-size: 26px; overflow-wrap: anywhere; }
+.secret-card .secret-description { max-width: 220px; line-height: 1.5; }
+.known-secret-banner { max-width: 670px; margin: -5px auto 18px; padding: 13px 18px; display: grid; justify-items: center; gap: 5px; border: 1px solid #50543a; background: #24261d; text-align: center; animation: secret-appear .35s ease-out both; }
+.known-secret-banner > span, .known-secret-banner > small { color: #aeb19a; font: 8px var(--mono); letter-spacing: .8px; }
+.known-secret-banner > b { color: var(--acid); font: 700 clamp(20px, 4vw, 30px) var(--display); overflow-wrap: anywhere; }
+.role-intro-backdrop { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; pointer-events: none; background: #08090655; animation: role-backdrop-fade 2.3s ease both; }
+.role-intro-card { width: min(390px, 84vw); min-height: 240px; padding: 27px 24px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; border: 1px solid #737a4b; background: linear-gradient(145deg, #292c20, #191a16); box-shadow: 0 24px 90px #000b, 0 0 60px #d6fc5620; text-align: center; animation: role-card-transfer 2.3s cubic-bezier(.2,.72,.2,1) both; }
+.role-intro-mark { font-size: 38px; line-height: 1; }
+.role-intro-title { color: #c3d78d; font: 9px var(--mono); letter-spacing: 1.2px; }
+.role-intro-card > b { color: var(--acid); font: 700 clamp(28px, 7vw, 43px)/1.1 var(--display); overflow-wrap: anywhere; }
+.role-intro-card > small { color: #c5c5b5; font-size: 11px; }
+.timer-pill.urgent { animation: timer-rush .7s ease-in-out infinite alternate; }
+@keyframes role-card-transfer {
+  0%, 29% { opacity: 1; transform: translate(0, 0) scale(1); }
+  100% { opacity: 0; transform: translate(34vw, -31vh) scale(.28); }
+}
+@keyframes role-backdrop-fade { 0%, 35% { opacity: 1; } 100% { opacity: 0; } }
+@keyframes timer-rush { to { box-shadow: 0 0 15px #ff907f55; transform: scale(1.045); } }
+@media (max-width: 600px) {
+  @keyframes role-card-transfer {
+    0%, 29% { opacity: 1; transform: translate(0, 0) scale(1); }
+    100% { opacity: 0; transform: translate(23vw, -25vh) scale(.25); }
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .role-intro-backdrop, .role-intro-card, .known-secret-banner, .timer-pill.urgent { animation-duration: .01ms; animation-iteration-count: 1; }
+}
 .mode-picker { display: grid; gap: 7px; }
 .mode-option { min-height: 59px; display: flex; align-items: center; gap: 10px; padding: 8px; text-align: left; border: 1px solid #35362d; background: #13140f; cursor: pointer; }
 .mode-option.selected { border-color: #606840; background: #23261b; }

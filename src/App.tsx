@@ -59,7 +59,7 @@ function roomDefaults(host: Player, values: { name: string; code?: string; isPub
   };
 }
 
-type Cue = "start" | "reveal" | "clue" | "vote" | "elimination" | "win";
+type Cue = "start" | "reveal" | "clue" | "vote" | "elimination" | "win" | "hurry";
 
 function useGameAudio() {
   const [musicEnabled, setMusicEnabled] = useState(false);
@@ -83,7 +83,7 @@ function useGameAudio() {
     oscillator.type = type;
     oscillator.frequency.setValueAtTime(frequency, start);
     gain.gain.setValueAtTime(0.0001, start);
-    gain.gain.exponentialRampToValueAtTime(volume, start + 0.08);
+    gain.gain.exponentialRampToValueAtTime(volume, start + Math.min(0.08, duration * 0.35));
     gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
     oscillator.connect(gain);
     gain.connect(context.destination);
@@ -91,34 +91,48 @@ function useGameAudio() {
     oscillator.stop(start + duration + 0.05);
   }, [getContext]);
 
-  const cue = useCallback((kind: Cue) => {
+  const cue = useCallback((kind: Cue, timeRemaining = 0) => {
     if (!effectsEnabled) return;
     const context = getContext();
     if (!context) return;
     const now = context.currentTime;
-    const notes: Record<Cue, number[]> = {
-      start: [392, 523, 659],
+    if (kind === "hurry") {
+      const urgency = Math.max(0, Math.min(10, timeRemaining));
+      const frequency = 560 + (10 - urgency) * 38;
+      playNote(frequency, now, 0.07, 0.045, "square");
+      if (urgency <= 5) playNote(frequency * 1.5, now + 0.1, 0.055, 0.025, "triangle");
+      return;
+    }
+    if (kind === "start") {
+      [523.25, 659.25, 783.99, 1046.5].forEach((frequency, index) => {
+        playNote(frequency, now + index * 0.105, 0.28, 0.045, index % 2 ? "sine" : "triangle");
+      });
+      return;
+    }
+    const notes: Partial<Record<Cue, number[]>> = {
       reveal: [440, 587],
       clue: [523, 659],
       vote: [349, 440],
       elimination: [330, 262],
       win: [523, 659, 784],
     };
-    notes[kind].forEach((frequency, index) => playNote(frequency, now + index * 0.09, kind === "elimination" ? 0.45 : 0.23, 0.055, "triangle"));
+    notes[kind]?.forEach((frequency, index) => playNote(frequency, now + index * 0.09, kind === "elimination" ? 0.45 : 0.23, 0.055, "triangle"));
   }, [effectsEnabled, getContext, playNote]);
 
   useEffect(() => {
     if (!musicEnabled) return;
     const context = getContext();
     if (!context) return;
-    const progression = [130.81, 164.81, 196, 164.81, 146.83, 174.61, 220, 174.61];
+    const melody = [659.25, 783.99, 987.77, 783.99, 698.46, 880, 1046.5, 880];
+    const bass = [130.81, 164.81, 196, 164.81, 146.83, 174.61, 220, 174.61];
     let step = 0;
     const timer = window.setInterval(() => {
       const start = context.currentTime;
-      playNote(progression[step % progression.length]!, start, 1.35, 0.012);
-      playNote(progression[(step + 2) % progression.length]! * 2, start + 0.18, 0.9, 0.006);
+      playNote(bass[step % bass.length]!, start, 0.32, 0.016, "triangle");
+      playNote(melody[step % melody.length]!, start + 0.035, 0.2, 0.014, "triangle");
+      playNote(melody[(step + 2) % melody.length]!, start + 0.22, 0.16, 0.009, "sine");
       step++;
-    }, 1050);
+    }, 390);
     return () => window.clearInterval(timer);
   }, [musicEnabled, getContext, playNote]);
 
@@ -559,6 +573,11 @@ function App() {
     return () => clearInterval(timer);
   }, [room?.status, room?.turnIndex, room?.mode, screen, passTurnReady]);
 
+  useEffect(() => {
+    if (!room || !["playing", "voting"].includes(room.status) || countdown > 10 || countdown <= 0) return;
+    audio.cue("hurry", countdown);
+  }, [audio.cue, countdown, room?.status]);
+
   const submitClue = async (skipped = false) => {
     if (!room) return;
     const playerId = room.turnOrder[room.turnIndex];
@@ -925,6 +944,8 @@ function Game({ room, userId, voterId, online, countdown, reveal, setReveal, pas
   const [guess, setGuess] = useState("");
   const [showGuess, setShowGuess] = useState(false);
   const [readyTurnKey, setReadyTurnKey] = useState("");
+  const [roleIntroVisible, setRoleIntroVisible] = useState(false);
+  const roleIntroPlayedRef = useRef(false);
   const [guesserId, setGuesserId] = useState(room.impostors[0] || userId);
   const turnKey = `${room.round}:${room.turnIndex}`;
   const passRoleReady = readyTurnKey === turnKey;
@@ -936,6 +957,19 @@ function Game({ room, userId, voterId, online, countdown, reveal, setReveal, pas
     ? isImpostor && isAlive
     : room.impostors.some((id) => room.players.some((player) => player.id === id && player.alive));
   useEffect(() => {
+    if (room.status !== "playing") {
+      roleIntroPlayedRef.current = false;
+      setRoleIntroVisible(false);
+      return;
+    }
+    if (!online || room.round !== 1 || !room.word || roleIntroPlayedRef.current) return;
+    roleIntroPlayedRef.current = true;
+    setReveal(true);
+    setRoleIntroVisible(true);
+    const timer = window.setTimeout(() => setRoleIntroVisible(false), 2300);
+    return () => window.clearTimeout(timer);
+  }, [online, room.id, room.status, room.round, room.word, setReveal]);
+  useEffect(() => {
     if (!reveal) return;
     const timer = window.setTimeout(() => setReveal(false), 12_000);
     return () => window.clearTimeout(timer);
@@ -946,17 +980,18 @@ function Game({ room, userId, voterId, online, countdown, reveal, setReveal, pas
     }
   }, [room.status, room.impostors, room.players, guesserId]);
   const clueRounds = room.clues.reduce<Record<string, typeof room.clues>>((groups, clue) => ({ ...groups, [clue.round]: [...(groups[clue.round] || []), clue] }), {});
-  return <div className="game-page"><div className="game-top"><button className="back-link" onClick={onHome}><ArrowLeft size={15} /> Leave game</button><span className="game-round-tag">ROUND <b>{String(room.round).padStart(2, "0")}</b></span><span className="game-player-count"><Users size={14} /> {room.players.filter((player) => player.alive).length} ALIVE</span></div>
+  return <div className="game-page">{roleIntroVisible && <div className="role-intro-backdrop" aria-live="polite"><div className="role-intro-card"><span className="role-intro-mark">{isImpostor ? "👻" : "🔐"}</span><span className="role-intro-title">{isImpostor ? "YOU’RE THE IMPOSTOR" : "YOU’RE A CIVILIAN"}</span><b>{isImpostor ? room.hint : room.word}</b><small>{isImpostor ? "Your hint" : "The secret word"}</small></div></div>}<div className="game-top"><button className="back-link" onClick={onHome}><ArrowLeft size={15} /> Leave game</button><span className="game-round-tag">ROUND <b>{String(room.round).padStart(2, "0")}</b></span><span className="game-player-count"><Users size={14} /> {room.players.filter((player) => player.alive).length} ALIVE</span></div>
     <div className="game-header"><span className="modal-kicker">{room.status === "playing" ? "CLUE ROUND" : room.status === "voting" ? "VOTING IS OPEN" : room.status === "ended" ? "GAME OVER" : "THE VOTE IS IN"}</span>
       <h1>{room.status === "playing" ? <>Say something.<br /><span>Don’t say too much.</span></> : room.status === "voting" ? <>Who’s the<br /><span>impostor?</span></> : room.status === "ended" ? <>The truth<br /><span>comes out.</span></> : <>The votes<br /><span>are in.</span></>}</h1>
       <p>{room.status === "playing" ? "One clue each. Keep it casual. Keep your eyes open." : room.status === "voting" ? "Choose carefully. Or vote to let everyone off the hook." : room.status === "ended" ? "Every bluff eventually has a tell." : "Here’s who got sent packing."}</p>
     </div>
+    {online && ["voting", "results"].includes(room.status) && <div className="known-secret-banner"><span>{isImpostor ? "YOUR IMPOSTOR HINT" : "YOUR SECRET WORD"}</span><b>{isImpostor ? room.hint : room.word}</b><small>{isImpostor ? "You’re the impostor" : "You’re a civilian"}</small></div>}
     {room.status === "playing" && <div className="game-columns"><section className="panel play-panel"><div className="play-topline"><span><MessageCircle size={15} /> YOUR TURN</span><span className={`timer-pill ${countdown <= 8 ? "urgent" : ""}`}><Timer size={15} /> 00:{String(countdown).padStart(2, "0")}</span></div>
       <div className="turn-player"><span className="large-avatar">{currentPlayer?.avatarUrl ? <img src={currentPlayer.avatarUrl} alt="" referrerPolicy="no-referrer" /> : currentPlayer?.avatar}</span><span><b>{online ? isTurn ? "It’s your turn" : `${currentPlayer?.name ?? "Player"} is up` : `${currentPlayer?.name ?? "Player"} is up`}</b><small>{isTurn ? "Drop a clue before time runs out." : "Take a breath. Your turn is coming."}</small></span></div>
       {isTurn && <div className="clue-input-wrap"><label htmlFor="clue-input">YOUR CLUE <span>· ONE WORD, A PHRASE, OR A WHOLE SENTENCE</span></label><textarea id="clue-input" autoFocus value={clueInput} onChange={(event) => setClueInput(event.target.value)} placeholder="Keep it clever. Keep it vague." maxLength={120} disabled={!online && !passTurnReady} /><div className="clue-actions"><small>{clueInput.length}/120</small><button className="button-primary" onClick={onSubmit} disabled={!clueInput.trim() || !online && !passTurnReady}>Submit clue <ArrowRight size={15} /></button></div></div>}
       {!isTurn && <div className="turn-wait"><span className="waiting-bars"><i /><i /><i /></span>When it’s your turn, add one clue to the pile.</div>}
       <div className="clue-history"><div className="clue-history-head">CLUE ARCHIVE <span>{room.clues.length} TOTAL</span></div>{room.clues.length ? Object.entries(clueRounds).sort(([a], [b]) => Number(b) - Number(a)).map(([round, clues]) => <section className="clue-round-group" key={round}><div className="clue-round-label">ROUND {String(round).padStart(2, "0")} <span>{clues.length} CLUES</span></div>{clues.map((clue, i) => { const player = room.players.find((entry) => entry.id === clue.playerId); return <div className="clue-history-row" key={`${clue.playerId}-${i}`}><span>{player?.avatarUrl ? <img src={player.avatarUrl} alt="" referrerPolicy="no-referrer" /> : player?.avatar}</span><b>{player?.name}</b><span className="clue-chip">{clue.text}</span></div>; })}</section>) : <div className="no-clues">First clue sets the tone. No pressure.</div>}</div>
-    </section><aside className="game-side">{online && <div className="secret-card"><span className="secret-kicker"><Fingerprint size={15} /> YOUR SECRET ROLE</span>{reveal ? <><div className="secret-word">{isImpostor ? "IMPOSTOR" : room.word}</div><span className="secret-description">{isImpostor ? `Your hint: ${room.hint}` : "You are a civilian. Protect the word."}</span><button className="reveal-button" onClick={() => setReveal(false)}><Eye size={14} /> Hide my secret</button></> : <><div className="secret-covered"><span>?</span><i>KEEP THIS TO YOURSELF</i></div><button className="reveal-button" onClick={() => { onRevealRole(); setReveal(true); }}><Eye size={14} /> Tap to reveal your role</button></>}<span className="secret-reminder">Don’t let anyone else see your screen.</span></div>}
+    </section><aside className="game-side">{online && <div className="secret-card"><span className="secret-kicker"><Fingerprint size={15} /> {isImpostor ? "YOU’RE THE IMPOSTOR" : "YOU’RE A CIVILIAN"}</span><div className="secret-word">{isImpostor ? room.hint : room.word}</div><span className="secret-description">{isImpostor ? "Your hint. Blend in and work out the word." : "Your secret word. Protect it."}</span></div>}
       <div className="turn-order-card"><div className="clue-history-head">TURN ORDER <span>SHUFFLED EACH ROUND</span></div>{room.turnOrder.map((id, index) => { const player = room.players.find((entry) => entry.id === id); return <div key={id} className={`turn-order-row ${index === room.turnIndex ? "current" : ""} ${index < room.turnIndex ? "done" : ""}`}><span className="order-number">{String(index + 1).padStart(2, "0")}</span><span>{player?.avatarUrl ? <img src={player.avatarUrl} alt="" referrerPolicy="no-referrer" /> : player?.avatar}</span><b>{player?.name}</b>{index < room.turnIndex ? <Check size={13} /> : index === room.turnIndex ? <span className="your-turn-dot" /> : null}</div>; })}</div>
     </aside></div>}
     {room.status === "voting" && <section className="vote-section panel">        <div className="vote-top"><div><span className="eyebrow">CAST YOUR VOTE</span><h2>{online ? "Who do you suspect?" : `${voter?.name ?? "Player"}, who do you suspect?`}</h2></div><span className={`timer-pill ${countdown <= 8 ? "urgent" : ""}`}><Timer size={15} /> 00:{String(countdown).padStart(2, "0")}</span></div>
