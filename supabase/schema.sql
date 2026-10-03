@@ -99,8 +99,8 @@ begin
   if auth.uid() is null or auth.uid() <> p_user_id then
     raise exception 'Please sign in before joining a room';
   end if;
-  if length(trim(p_nickname)) = 0 or length(p_nickname) > 20 then
-    raise exception 'Nickname must contain 1 to 20 characters';
+  if length(trim(p_nickname)) = 0 or length(p_nickname) > 32 then
+    raise exception 'Display name must contain 1 to 32 characters';
   end if;
   if trim(p_code) !~ '^[A-Za-z0-9]{1,20}$' then raise exception 'Invalid room code'; end if;
   select * into found_room from public.lobbies

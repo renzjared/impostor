@@ -106,6 +106,12 @@ button:disabled { cursor: not-allowed !important; opacity: .45; }
 .guesser-picker select { max-width: 130px; border: 1px solid #454735; background: #1b1d16; color: var(--cream); padding: 5px; font-size: 9px; }
 .nav-right .icon-button { width: 29px; height: 29px; border-color: transparent; color: #77796d; }
 .nav-right .icon-button:hover, .nav-right .icon-button.audio-on { color: var(--acid); border-color: #41452e; background: #22251b; }
+.profile-avatar img, .player-avatar img, .large-avatar img, .pass-player-avatar img, .settings-profile-avatar img, .winner-reveal img { width: 100%; height: 100%; object-fit: cover; border-radius: inherit; }
+.settings-profile-avatar { overflow: hidden; flex: 0 0 47px; border-radius: 4px; }
+.settings-reset-name { margin: 8px 0 0 36px; font-size: 9px; }
+.clue-history-row > span:first-child { width: 18px; height: 18px; flex: 0 0 18px; display: grid; place-items: center; overflow: hidden; border-radius: 50%; }
+.turn-order-row > span:nth-child(2) { width: 18px; height: 18px; flex: 0 0 18px; display: grid; place-items: center; overflow: hidden; border-radius: 50%; }
+.turn-order-row > span:nth-child(2) img { width: 100%; height: 100%; object-fit: cover; }
 .mode-picker { display: grid; gap: 7px; }
 .mode-option { min-height: 59px; display: flex; align-items: center; gap: 10px; padding: 8px; text-align: left; border: 1px solid #35362d; background: #13140f; cursor: pointer; }
 .mode-option.selected { border-color: #606840; background: #23261b; }

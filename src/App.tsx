@@ -11,6 +11,7 @@ import type { CustomPack, GameRoom, Pack, Player } from "./types";
 
 type Screen = "home" | "lobby" | "game" | "packs";
 type Modal = "create" | "join" | "rules" | "settings" | "addPlayer" | null;
+type AuthIdentity = { id: string; displayName?: string; avatarUrl?: string; isDiscordUser: boolean };
 const ROOM_KEY = "impostor-room-v1";
 const USER_KEY = "impostor-player-v1";
 const CUSTOM_KEY = "impostor-custom-packs-v1";
@@ -25,8 +26,20 @@ function read<T>(key: string, fallback: T): T {
 
 }
 
-function makePlayer(name: string, id: string = randomId(), avatar?: string): Player {
-  return { id, name: name.trim().slice(0, 20), avatar: avatar || AVATARS[Math.floor(Math.random() * AVATARS.length)]!, ready: false, alive: true };
+function makePlayer(name: string, id: string = randomId(), avatar?: string, avatarUrl?: string): Player {
+  return { id, name: name.trim().slice(0, 32), avatar: avatar || AVATARS[Math.floor(Math.random() * AVATARS.length)]!, avatarUrl, ready: false, alive: true };
+}
+
+function getDiscordProfile(user: { user_metadata: Record<string, unknown> }) {
+  const metadata = user.user_metadata;
+  const candidateName = [metadata.global_name, metadata.name, metadata.full_name, metadata.user_name, metadata.preferred_username]
+    .find((value): value is string => typeof value === "string" && value.trim().length > 0);
+  const avatar = metadata.avatar_url;
+  return {
+    name: candidateName?.trim().slice(0, 32) || "Discord player",
+    avatarUrl: typeof avatar === "string" && avatar.startsWith("https://") ? avatar : undefined,
+    displayNameOverride: typeof metadata.game_display_name === "string" ? metadata.game_display_name.trim().slice(0, 32) : "",
+  };
 }
 
 function shuffled<T>(list: T[]): T[] {
@@ -155,8 +168,12 @@ function App() {
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const phaseRef = useRef<{ id: string; status: GameRoom["status"]; turnIndex: number } | null>(null);
   const resolvingVoteRef = useRef(false);
+  const authReadyRef = useRef<Promise<AuthIdentity> | null>(null);
 
   const [userId, setUserId] = useState<string>(() => read<string>("impostor-user-id-v1", randomId()));
+  const initialUserIdRef = useRef(userId);
+  const [discordName, setDiscordName] = useState("");
+  const [profileAvatarUrl, setProfileAvatarUrl] = useState<string>();
   const audio = useGameAudio();
 
   const notify = useCallback((message: string) => {
@@ -188,43 +205,69 @@ function App() {
     localStorage.setItem(CUSTOM_KEY, JSON.stringify(customPacks));
   }, [customPacks]);
 
+  const ensureAuth = useCallback((): Promise<AuthIdentity> => {
+    const client = supabase;
+    if (!client) return Promise.reject(new Error("Supabase is not configured."));
+    if (authReadyRef.current) return authReadyRef.current;
+    const authPromise = (async () => {
+      const { data, error } = await client.auth.getSession();
+      if (error) throw new Error(`Supabase connection error: ${error.message}`);
+      let session = data.session;
+      if (!session) {
+        const { data: authData, error: authError } = await client.auth.signInAnonymously();
+        if (authError) throw new Error(`Guest sign-in failed: ${authError.message}`);
+        session = authData.session;
+      }
+      if (!session) throw new Error("Supabase did not create a guest session.");
+      const authId = session.user.id;
+      const isDiscordUser = session.user.app_metadata.provider === "discord"
+        || (session.user.app_metadata.providers as string[] | undefined)?.includes("discord") === true;
+      let displayName: string | undefined;
+      let avatarUrl: string | undefined;
+      if (isDiscordUser) {
+        const profile = getDiscordProfile(session.user);
+        displayName = profile.displayNameOverride || profile.name;
+        avatarUrl = profile.avatarUrl;
+        setDiscordName(profile.name);
+        setProfileAvatarUrl(profile.avatarUrl);
+        setName(displayName);
+      }
+      setRoom((current) => current ? {
+        ...current,
+        hostId: current.hostId === initialUserIdRef.current ? authId : current.hostId,
+        players: current.players.map((player) => player.id === initialUserIdRef.current ? { ...player, id: authId } : player),
+      } : current);
+      setUserId(authId);
+      setDiscordConnected(isDiscordUser);
+      setConnected(true);
+      return { id: authId, displayName, avatarUrl, isDiscordUser };
+    })().catch((error: unknown) => {
+      authReadyRef.current = null;
+      setConnected(false);
+      throw error;
+    });
+    authReadyRef.current = authPromise;
+    return authPromise;
+  }, []);
+
   useEffect(() => {
     const client = supabase;
     if (!client) return;
     let alive = true;
-    client.auth.getSession().then(async ({ data, error }) => {
-      if (error) notify(`Supabase connection error: ${error.message}`);
-      let session = data.session;
-      if (!session) {
-        const { data: authData, error: authError } = await client.auth.signInAnonymously();
-        if (authError) notify(`Guest sign-in failed: ${authError.message}`);
-        session = authData.session;
+    void ensureAuth().then(async () => {
+      const { data: packsData, error: packsError } = await client.from("booster_packs").select("id, owner_id, title, words");
+      if (packsError) notify(`Could not load community packs: ${packsError.message}`);
+      else if (alive && packsData) {
+        setCustomPacks(packsData.map((pack) => ({
+          id: pack.id, ownerId: pack.owner_id, title: pack.title,
+          words: Array.isArray(pack.words) ? pack.words as CustomPack["words"] : [],
+        })));
       }
-      if (session && alive) {
-        const authId = session.user.id;
-        if (userId !== authId) {
-          setRoom((current) => current ? {
-            ...current,
-            hostId: current.hostId === userId ? authId : current.hostId,
-            players: current.players.map((player) => player.id === userId ? { ...player, id: authId } : player),
-          } : current);
-          setUserId(authId);
-        }
-        const providers = session.user.app_metadata.providers as string[] | undefined;
-        setDiscordConnected(session.user.app_metadata.provider === "discord" || providers?.includes("discord") === true);
-        const { data: packsData, error: packsError } = await client.from("booster_packs").select("id, owner_id, title, words");
-        if (packsError) notify(`Could not load community packs: ${packsError.message}`);
-        else if (alive && packsData) {
-          setCustomPacks(packsData.map((pack) => ({
-            id: pack.id, ownerId: pack.owner_id, title: pack.title,
-            words: Array.isArray(pack.words) ? pack.words as CustomPack["words"] : [],
-          })));
-        }
-      }
-      if (alive) setConnected(Boolean(session) && !error);
+    }).catch((error: unknown) => {
+      if (alive) notify(error instanceof Error ? error.message : "Could not sign in as a guest.");
     });
     return () => { alive = false; };
-  }, [notify, userId]);
+  }, [ensureAuth, notify]);
 
   const loadPublicRooms = useCallback(async () => {
     const client = supabase;
@@ -330,25 +373,62 @@ function App() {
       notify("Choose a nickname before joining.");
       return false;
     }
-    setName(chosen.slice(0, 20));
+    setName(chosen.slice(0, 32));
+    return true;
+  };
+
+  const saveProfileName = async (candidate: string) => {
+    const chosen = candidate.trim();
+    if (!chosen) {
+      notify("Enter a display name before saving.");
+      return false;
+    }
+    if (chosen.length > 32) {
+      notify("Display names can be up to 32 characters.");
+      return false;
+    }
+    if (supabase && discordConnected) {
+      const { error } = await supabase.auth.updateUser({
+        data: { game_display_name: chosen === discordName ? null : chosen },
+      });
+      if (error) {
+        notify(`Could not save your display name: ${error.message}`);
+        return false;
+      }
+    }
+    setName(chosen);
     return true;
   };
 
   const createRoom = async (values: { name: string; code?: string; isPublic: boolean; mode: GameRoom["mode"]; packs: string[]; impostorCount: number; voteSeconds: number }) => {
-    if (!chooseName()) return;
     if (values.mode === "personal-devices" && !supabase) {
       notify("Personal-device play needs Supabase. Configure it first, or choose pass-and-play.");
       return;
     }
+    let hostId = userId;
+    let hostName = name;
+    let hostAvatarUrl = profileAvatarUrl;
+    if (values.mode === "personal-devices") {
+      try {
+        const identity = await ensureAuth();
+        hostId = identity.id;
+        hostName = identity.isDiscordUser ? identity.displayName || hostName : hostName;
+        hostAvatarUrl = identity.avatarUrl;
+      } catch (error) {
+        notify(error instanceof Error ? error.message : "Could not sign in as a guest.");
+        return;
+      }
+    }
+    if (!chooseName(hostName)) return;
     if (values.mode === "pass-and-play" && values.isPublic) {
       notify("Pass-and-play rooms stay on this device. Choose private to continue.");
       return;
     }
-    const host = makePlayer(name || "Player", userId);
+    const host = makePlayer(hostName || discordName || "Player", hostId, undefined, hostAvatarUrl);
     const next = roomDefaults(host, values);
     if (supabase && values.mode === "personal-devices") {
       const state = { ...next, word: undefined, hint: undefined, impostors: [] };
-      const { data, error } = await supabase.from("lobbies").insert({ id: next.id, code: next.code, name: next.name, is_public: next.isPublic, host_id: userId, state, status: "lobby" }).select("id, code").single();
+      const { data, error } = await supabase.from("lobbies").insert({ id: next.id, code: next.code, name: next.name, is_public: next.isPublic, host_id: hostId, state, status: "lobby" }).select("id, code").single();
       if (error) {
         notify(error.code === "23505" ? "That room code was just taken. Please create the room again." : `Could not create room: ${error.message}`);
         return;
@@ -362,12 +442,26 @@ function App() {
   };
 
   const joinRoom = async (code: string) => {
-    if (!name.trim()) {
+    let activeUserId = userId;
+    let joinName = name;
+    let joinAvatarUrl = profileAvatarUrl;
+    if (supabase) {
+      try {
+        const identity = await ensureAuth();
+        activeUserId = identity.id;
+        joinName = identity.isDiscordUser ? identity.displayName || joinName : joinName;
+        joinAvatarUrl = identity.avatarUrl;
+      } catch (error) {
+        notify(error instanceof Error ? error.message : "Could not sign in as a guest.");
+        return;
+      }
+    }
+    if (!joinName.trim()) {
       setPendingJoin(code);
       setModal("join");
       return;
     }
-    if (!chooseName()) return;
+    if (!chooseName(joinName)) return;
     let cleaned = code.trim();
     if (/^https?:\/\//i.test(cleaned)) {
       try {
@@ -380,7 +474,7 @@ function App() {
     }
     let target = publicRooms.find((candidate) => candidate.code.toLowerCase() === cleaned.toLowerCase());
     if (supabase) {
-      const { data, error } = await supabase.rpc("join_lobby", { p_code: cleaned, p_nickname: name.trim().slice(0, 20), p_user_id: userId });
+      const { data, error } = await supabase.rpc("join_lobby", { p_code: cleaned, p_nickname: joinName.trim().slice(0, 32), p_user_id: activeUserId });
       if (error || !data) {
         notify(error?.message || "Room not found. Check the code and try again.");
         return;
@@ -396,7 +490,11 @@ function App() {
       notify("Room not found. Ask the host for an active room code.");
       return;
     }
-    if (!target.players.some((player) => player.id === userId)) target.players.push(makePlayer(name, userId));
+    const existingPlayer = target.players.find((player) => player.id === activeUserId);
+    if (existingPlayer) {
+      existingPlayer.name = joinName;
+      existingPlayer.avatarUrl = joinAvatarUrl;
+    } else target.players.push(makePlayer(joinName, activeUserId, undefined, joinAvatarUrl));
     setRoom(target);
     setScreen("lobby");
     setModal(null);
@@ -622,7 +720,7 @@ function App() {
           {hasSupabase && !discordConnected && <button className="discord-login-link" onClick={() => void connectDiscord()}>Connect Discord</button>}
           <IconButton title={audio.musicEnabled ? "Turn music off" : "Turn music on"} className={audio.musicEnabled ? "audio-on" : ""} onClick={() => { if (!audio.toggleMusic()) notify("This browser doesn’t support audio."); }}><Music2 size={15} /></IconButton>
           <IconButton title={audio.effectsEnabled ? "Turn sound effects off" : "Turn sound effects on"} className={audio.effectsEnabled ? "audio-on" : ""} onClick={() => { if (!audio.toggleEffects()) notify("This browser doesn’t support audio."); }}><span className="volume-icon">{audio.effectsEnabled ? <Volume2 size={15} /> : <VolumeX size={15} />}</span></IconButton>
-          <button className="profile-chip" onClick={() => setModal("settings")}><span className="profile-avatar">{AVATARS[(name.length || 2) % AVATARS.length]}</span><span>{name || "Guest"}</span><ChevronDown size={14} /></button>
+          <button className="profile-chip" onClick={() => setModal("settings")}><span className="profile-avatar">{profileAvatarUrl ? <img src={profileAvatarUrl} alt="" referrerPolicy="no-referrer" /> : AVATARS[(name.length || 2) % AVATARS.length]}</span><span>{name || "Guest"}</span><ChevronDown size={14} /></button>
           <button className="mobile-menu" onClick={() => setModal("settings")} aria-label="Menu"><Menu size={20} /></button>
         </div>
       </header>
@@ -665,7 +763,7 @@ function App() {
         {modal === "create" && <CreateDialog packs={allPacks} onlineAvailable={hasSupabase} onCancel={() => setModal(null)} onCreate={createRoom} name={name} setName={setName} />}
         {modal === "join" && <JoinDialog initialCode={pendingJoin} onCancel={() => { setModal(null); setPendingJoin(""); }} onJoin={joinRoom} name={name} setName={setName} />}
         {modal === "rules" && <RulesDialog onClose={() => setModal(null)} />}
-        {modal === "settings" && <SettingsDialog name={name} setName={setName} onClose={() => setModal(null)} />}
+        {modal === "settings" && <SettingsDialog name={name} avatarUrl={profileAvatarUrl} isDiscordUser={discordConnected} discordName={discordName} onSave={saveProfileName} onClose={() => setModal(null)} />}
         {modal === "addPlayer" && <AddPlayerDialog onCancel={() => setModal(null)} onAdd={addLocalPlayer} />}
       </ModalFrame>}
       {toast && <div className="toast"><Sparkles size={16} />{toast}</div>}
@@ -754,7 +852,7 @@ function CreateDialog({ packs, onlineAvailable, onCancel, onCreate, name, setNam
   const [voteSeconds, setVoteSeconds] = useState(30);
   const togglePack = (id: string) => setSelectedPacks((selected) => selected.includes(id) ? selected.filter((value) => value !== id) : [...selected, id]);
   return <><div className="modal-head"><div><span className="modal-kicker">NEW ROUND</span><h2>Set the scene.</h2><p>Every great round starts with a good secret.</p></div><IconButton title="Close" onClick={onCancel}><X size={18} /></IconButton></div>
-    <div className="field"><label>YOUR NICKNAME</label><input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="What do your friends call you?" maxLength={20} /></div>
+    <div className="field"><label>YOUR DISPLAY NAME</label><input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="What do your friends call you?" maxLength={32} /></div>
     <div className="field"><label>ROOM NAME</label><input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={30} /></div>
     <div className="field"><label>HOW WILL YOU PLAY?</label><div className="mode-picker">
       <button className={mode === "pass-and-play" ? "mode-option selected" : "mode-option"} onClick={() => { setMode("pass-and-play"); setIsPublic(false); }}><span className="mode-icon">📱</span><span><b>One device</b><small>Pass the phone around. Secrets are shown one at a time.</small></span><i>{mode === "pass-and-play" && <Check size={13} />}</i></button>
@@ -775,7 +873,7 @@ function CreateDialog({ packs, onlineAvailable, onCancel, onCreate, name, setNam
 function JoinDialog({ initialCode, onCancel, onJoin, name, setName }: { initialCode: string; onCancel: () => void; onJoin: (code: string) => void; name: string; setName: (name: string) => void }) {
   const [code, setCode] = useState(initialCode);
   return <><div className="modal-head"><div><span className="modal-kicker">YOU’RE INVITED</span><h2>Get in the game.</h2><p>Enter the room code your friend shared.</p></div><IconButton title="Close" onClick={onCancel}><X size={18} /></IconButton></div>
-    <div className="field"><label>YOUR NICKNAME</label><input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="What do your friends call you?" maxLength={20} /></div>
+    <div className="field"><label>YOUR DISPLAY NAME</label><input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="What do your friends call you?" maxLength={32} /></div>
     <div className="field"><label>ROOM CODE OR PRIVATE LINK</label><input className="code-input" value={code} onChange={(event) => setCode(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") onJoin(code); }} placeholder="e.g. 482 109" maxLength={40} /></div>
     <div className="private-hint"><LockKeyhole size={16} /><span>Private room? Make sure your host gave you the right code.</span></div>
     <div className="modal-actions"><button className="button-secondary" onClick={onCancel}>Cancel</button><button className="button-primary" onClick={() => onJoin(code)}>Join the room <ArrowRight size={16} /></button></div>
@@ -793,7 +891,7 @@ function Lobby({ room, userId, packs, online, onBack, onReady, onStart, onAddPla
     <div className="lobby-title-row"><div><span className="modal-kicker">{room.isPublic ? "PUBLIC ROOM" : "PRIVATE ROOM"} · {room.mode === "pass-and-play" ? "ONE DEVICE" : "PERSONAL DEVICES"}</span><h1>{room.name}</h1><p>{room.mode === "pass-and-play" ? "Add your friends, then pass the device around." : "Waiting for the crew. Everyone plays on their own device."}</p></div>{room.mode === "personal-devices" && <span className="room-code-badge">ROOM CODE <b>{room.code}</b><button title="Copy invite link" onClick={onCopy}><Copy size={14} /></button></span>}</div>
     <div className="lobby-layout"><section className="lobby-main panel">
       <div className="panel-heading"><div><h2>Players <span>{room.players.length}/12</span></h2></div><span className="waiting-badge">WAITING FOR PLAYERS</span></div>
-      <div className="player-grid">{room.players.map((player, i) => <div key={player.id} className={`player-tile ${player.id === userId ? "is-you" : ""}`}><span className={`player-avatar player-color-${i % 6}`}>{player.avatar}</span><span className="player-name">{player.name}{player.id === userId && <small>YOU</small>}</span>{player.id === room.hostId ? <Crown size={14} className="host-crown" /> : <span className={`ready-indicator ${player.ready ? "is-ready" : ""}`} />}</div>)}
+      <div className="player-grid">{room.players.map((player, i) => <div key={player.id} className={`player-tile ${player.id === userId ? "is-you" : ""}`}><span className={`player-avatar player-color-${i % 6}`}>{player.avatarUrl ? <img src={player.avatarUrl} alt="" referrerPolicy="no-referrer" /> : player.avatar}</span><span className="player-name">{player.name}{player.id === userId && <small>YOU</small>}</span>{player.id === room.hostId ? <Crown size={14} className="host-crown" /> : <span className={`ready-indicator ${player.ready ? "is-ready" : ""}`} />}</div>)}
         {room.players.length < 12 && !online && <button className="player-tile add-player-tile" onClick={onAddPlayer}><span className="add-player-icon"><Plus size={19} /></span><span className="player-name">Add player</span></button>}
         {room.players.length < 3 && Array.from({ length: 3 - room.players.length }, (_, i) => <div className="player-tile waiting-tile" key={`waiting-${i}`}><span className="player-avatar waiting-avatar"><Users size={17} /></span><span className="player-name">Waiting for someone...</span><span className="ready-indicator" /></div>)}
       </div>
@@ -854,21 +952,21 @@ function Game({ room, userId, voterId, online, countdown, reveal, setReveal, pas
       <p>{room.status === "playing" ? "One clue each. Keep it casual. Keep your eyes open." : room.status === "voting" ? "Choose carefully. Or vote to let everyone off the hook." : room.status === "ended" ? "Every bluff eventually has a tell." : "Here’s who got sent packing."}</p>
     </div>
     {room.status === "playing" && <div className="game-columns"><section className="panel play-panel"><div className="play-topline"><span><MessageCircle size={15} /> YOUR TURN</span><span className={`timer-pill ${countdown <= 8 ? "urgent" : ""}`}><Timer size={15} /> 00:{String(countdown).padStart(2, "0")}</span></div>
-      <div className="turn-player"><span className="large-avatar">{currentPlayer?.avatar}</span><span><b>{online ? isTurn ? "It’s your turn" : `${currentPlayer?.name ?? "Player"} is up` : `${currentPlayer?.name ?? "Player"} is up`}</b><small>{isTurn ? "Drop a clue before time runs out." : "Take a breath. Your turn is coming."}</small></span></div>
+      <div className="turn-player"><span className="large-avatar">{currentPlayer?.avatarUrl ? <img src={currentPlayer.avatarUrl} alt="" referrerPolicy="no-referrer" /> : currentPlayer?.avatar}</span><span><b>{online ? isTurn ? "It’s your turn" : `${currentPlayer?.name ?? "Player"} is up` : `${currentPlayer?.name ?? "Player"} is up`}</b><small>{isTurn ? "Drop a clue before time runs out." : "Take a breath. Your turn is coming."}</small></span></div>
       {isTurn && <div className="clue-input-wrap"><label htmlFor="clue-input">YOUR CLUE <span>· ONE WORD, A PHRASE, OR A WHOLE SENTENCE</span></label><textarea id="clue-input" autoFocus value={clueInput} onChange={(event) => setClueInput(event.target.value)} placeholder="Keep it clever. Keep it vague." maxLength={120} disabled={!online && !passTurnReady} /><div className="clue-actions"><small>{clueInput.length}/120</small><button className="button-primary" onClick={onSubmit} disabled={!clueInput.trim() || !online && !passTurnReady}>Submit clue <ArrowRight size={15} /></button></div></div>}
       {!isTurn && <div className="turn-wait"><span className="waiting-bars"><i /><i /><i /></span>When it’s your turn, add one clue to the pile.</div>}
-      <div className="clue-history"><div className="clue-history-head">CLUE ARCHIVE <span>{room.clues.length} TOTAL</span></div>{room.clues.length ? Object.entries(clueRounds).sort(([a], [b]) => Number(b) - Number(a)).map(([round, clues]) => <section className="clue-round-group" key={round}><div className="clue-round-label">ROUND {String(round).padStart(2, "0")} <span>{clues.length} CLUES</span></div>{clues.map((clue, i) => <div className="clue-history-row" key={`${clue.playerId}-${i}`}><span>{room.players.find((player) => player.id === clue.playerId)?.avatar}</span><b>{room.players.find((player) => player.id === clue.playerId)?.name}</b><span className="clue-chip">{clue.text}</span></div>)}</section>) : <div className="no-clues">First clue sets the tone. No pressure.</div>}</div>
+      <div className="clue-history"><div className="clue-history-head">CLUE ARCHIVE <span>{room.clues.length} TOTAL</span></div>{room.clues.length ? Object.entries(clueRounds).sort(([a], [b]) => Number(b) - Number(a)).map(([round, clues]) => <section className="clue-round-group" key={round}><div className="clue-round-label">ROUND {String(round).padStart(2, "0")} <span>{clues.length} CLUES</span></div>{clues.map((clue, i) => { const player = room.players.find((entry) => entry.id === clue.playerId); return <div className="clue-history-row" key={`${clue.playerId}-${i}`}><span>{player?.avatarUrl ? <img src={player.avatarUrl} alt="" referrerPolicy="no-referrer" /> : player?.avatar}</span><b>{player?.name}</b><span className="clue-chip">{clue.text}</span></div>; })}</section>) : <div className="no-clues">First clue sets the tone. No pressure.</div>}</div>
     </section><aside className="game-side">{online && <div className="secret-card"><span className="secret-kicker"><Fingerprint size={15} /> YOUR SECRET ROLE</span>{reveal ? <><div className="secret-word">{isImpostor ? "IMPOSTOR" : room.word}</div><span className="secret-description">{isImpostor ? `Your hint: ${room.hint}` : "You are a civilian. Protect the word."}</span><button className="reveal-button" onClick={() => setReveal(false)}><Eye size={14} /> Hide my secret</button></> : <><div className="secret-covered"><span>?</span><i>KEEP THIS TO YOURSELF</i></div><button className="reveal-button" onClick={() => { onRevealRole(); setReveal(true); }}><Eye size={14} /> Tap to reveal your role</button></>}<span className="secret-reminder">Don’t let anyone else see your screen.</span></div>}
-      <div className="turn-order-card"><div className="clue-history-head">TURN ORDER <span>SHUFFLED EACH ROUND</span></div>{room.turnOrder.map((id, index) => { const player = room.players.find((entry) => entry.id === id); return <div key={id} className={`turn-order-row ${index === room.turnIndex ? "current" : ""} ${index < room.turnIndex ? "done" : ""}`}><span className="order-number">{String(index + 1).padStart(2, "0")}</span><span>{player?.avatar}</span><b>{player?.name}</b>{index < room.turnIndex ? <Check size={13} /> : index === room.turnIndex ? <span className="your-turn-dot" /> : null}</div>; })}</div>
+      <div className="turn-order-card"><div className="clue-history-head">TURN ORDER <span>SHUFFLED EACH ROUND</span></div>{room.turnOrder.map((id, index) => { const player = room.players.find((entry) => entry.id === id); return <div key={id} className={`turn-order-row ${index === room.turnIndex ? "current" : ""} ${index < room.turnIndex ? "done" : ""}`}><span className="order-number">{String(index + 1).padStart(2, "0")}</span><span>{player?.avatarUrl ? <img src={player.avatarUrl} alt="" referrerPolicy="no-referrer" /> : player?.avatar}</span><b>{player?.name}</b>{index < room.turnIndex ? <Check size={13} /> : index === room.turnIndex ? <span className="your-turn-dot" /> : null}</div>; })}</div>
     </aside></div>}
     {room.status === "voting" && <section className="vote-section panel">        <div className="vote-top"><div><span className="eyebrow">CAST YOUR VOTE</span><h2>{online ? "Who do you suspect?" : `${voter?.name ?? "Player"}, who do you suspect?`}</h2></div><span className={`timer-pill ${countdown <= 8 ? "urgent" : ""}`}><Timer size={15} /> 00:{String(countdown).padStart(2, "0")}</span></div>
       <p className="vote-intro">Pick one player to eliminate, or vote to skip this round. One vote per person.</p>
-      <div className="vote-options">{room.players.filter((player) => player.alive && player.id !== voterId).map((player) => <button disabled={voted || !canVote} className={`vote-option ${room.votes[voterId] === player.id ? "selected" : ""}`} key={player.id} onClick={() => onVote(player.id)}><span className="player-avatar">{player.avatar}</span><b>{player.name}</b>{room.votes[voterId] === player.id ? <Check size={16} /> : <Vote size={16} />}</button>)}</div>
+      <div className="vote-options">{room.players.filter((player) => player.alive && player.id !== voterId).map((player) => <button disabled={voted || !canVote} className={`vote-option ${room.votes[voterId] === player.id ? "selected" : ""}`} key={player.id} onClick={() => onVote(player.id)}><span className="player-avatar">{player.avatarUrl ? <img src={player.avatarUrl} alt="" referrerPolicy="no-referrer" /> : player.avatar}</span><b>{player.name}</b>{room.votes[voterId] === player.id ? <Check size={16} /> : <Vote size={16} />}</button>)}</div>
       <div className="vote-bottom"><button className={`skip-vote ${room.votes[voterId] === "skip" ? "selected" : ""}`} onClick={() => onVote("skip")} disabled={voted || !canVote}><ArrowDownLeft size={15} /> Skip this vote</button><span>{votedCount}/{room.players.filter((player) => player.alive).length} VOTES IN</span></div>
     </section>}
     {room.status === "results" && <section className="results-panel panel round-results"><div className="result-emoji">{room.eliminatedId ? "🗳️" : "🤝"}</div><h2>{room.eliminatedId ? `${room.players.find((player) => player.id === room.eliminatedId)?.name} is out.` : "Nobody was eliminated."}</h2><p>{room.eliminatedId ? room.eliminatedWasImpostor ? "The group caught an impostor. The secret stays secret until all impostors are out." : "An innocent civilian is out. The impostor is still among you." : "No one received more votes. Keep the same word and clues in mind."}</p>{canGuess && <div className="guess-inline">{!online && <label className="guesser-picker">HAND THE PHONE TO AN IMPOSTOR<select value={guesserId} onChange={(event) => setGuesserId(event.target.value)}>{room.impostors.filter((id) => room.players.some((player) => player.id === id && player.alive)).map((id) => <option key={id} value={id}>{room.players.find((player) => player.id === id)?.name}</option>)}</select></label>}<button className="text-link" onClick={() => setShowGuess(!showGuess)}>Impostor: guess the secret word to win <ArrowRight size={14} /></button>{showGuess && <form onSubmit={(event) => { event.preventDefault(); onGuess(guess, guesserId); setGuess(""); setShowGuess(false); }}><input value={guess} onChange={(event) => setGuess(event.target.value)} placeholder="Your guess..." /><button className="button-primary">Guess</button></form>}</div>}{canAdvance ? <button className="button-primary result-continue" onClick={onNext}>Continue with the same word <ArrowRight size={16} /></button> : <p className="host-waiting">Waiting for the host to start the next round.</p>}</section>}
-    {room.status === "ended" && <section className={`results-panel game-over panel winner-${room.winner}`}><div className="winner-glow" /><div className="result-emoji">{room.winner === "impostor" ? "👻" : "🎉"}</div><h2>{room.winner === "impostor" ? "Impostors win!" : "Civilians win!"}</h2><p>{room.winner === "impostor" ? "The impostor side survived the votes — or guessed the secret word." : "Every impostor was found out. The civilians take the win."}</p><div className="winner-reveal">{room.impostors.map((id) => <div key={id}><span>{room.players.find((player) => player.id === id)?.avatar}</span><span><small>IMPOSTOR</small><b>{room.players.find((player) => player.id === id)?.name}</b></span><Ghost size={17} /></div>)}</div><div className="result-word"><span>THE SECRET WORD</span><b>{room.word}</b></div><div className="winner-actions">{(!online || room.hostId === userId) && <button className="button-primary" onClick={onRematch}>New game in this lobby <ArrowRight size={16} /></button>}<button className="button-secondary" onClick={onHome}>Back to home</button></div></section>}
-    {room.status === "playing" && !online && !passRoleReady && <div className="pass-screen"><section className={`pass-reveal-card ${reveal ? "revealing" : ""}`}><span className="modal-kicker">PASS THE DEVICE</span><div className="pass-player-avatar">{currentPlayer?.avatar}</div><h2>{reveal ? "Your secret role" : `Pass to ${currentPlayer?.name}`}</h2><p>{reveal ? "Keep this to yourself. Don't let anyone else see the screen." : "Make sure only this player is looking before they reveal their role."}</p>{reveal && <div className="pass-secret"><b>{isImpostor ? "YOU’RE THE IMPOSTOR" : room.word}</b><span>{isImpostor ? `Your hint: ${room.hint}` : "You are a civilian. Protect the word."}</span></div>}<button className="button-primary" onClick={() => { if (!reveal) { onRevealRole(); setReveal(true); } else { setReveal(false); setReadyTurnKey(turnKey); onPassTurnReady(); } }}>{reveal ? "Hide my role & start turn" : "Tap to reveal my role"} <Eye size={15} /></button></section></div>}
+    {room.status === "ended" && <section className={`results-panel game-over panel winner-${room.winner}`}><div className="winner-glow" /><div className="result-emoji">{room.winner === "impostor" ? "👻" : "🎉"}</div><h2>{room.winner === "impostor" ? "Impostors win!" : "Civilians win!"}</h2><p>{room.winner === "impostor" ? "The impostor side survived the votes — or guessed the secret word." : "Every impostor was found out. The civilians take the win."}</p><div className="winner-reveal">{room.impostors.map((id) => { const player = room.players.find((entry) => entry.id === id); return <div key={id}><span>{player?.avatarUrl ? <img src={player.avatarUrl} alt="" referrerPolicy="no-referrer" /> : player?.avatar}</span><span><small>IMPOSTOR</small><b>{player?.name}</b></span><Ghost size={17} /></div>; })}</div><div className="result-word"><span>THE SECRET WORD</span><b>{room.word}</b></div><div className="winner-actions">{(!online || room.hostId === userId) && <button className="button-primary" onClick={onRematch}>New game in this lobby <ArrowRight size={16} /></button>}<button className="button-secondary" onClick={onHome}>Back to home</button></div></section>}
+    {room.status === "playing" && !online && !passRoleReady && <div className="pass-screen"><section className={`pass-reveal-card ${reveal ? "revealing" : ""}`}><span className="modal-kicker">PASS THE DEVICE</span><div className="pass-player-avatar">{currentPlayer?.avatarUrl ? <img src={currentPlayer.avatarUrl} alt="" referrerPolicy="no-referrer" /> : currentPlayer?.avatar}</div><h2>{reveal ? "Your secret role" : `Pass to ${currentPlayer?.name}`}</h2><p>{reveal ? "Keep this to yourself. Don't let anyone else see the screen." : "Make sure only this player is looking before they reveal their role."}</p>{reveal && <div className="pass-secret"><b>{isImpostor ? "YOU’RE THE IMPOSTOR" : room.word}</b><span>{isImpostor ? `Your hint: ${room.hint}` : "You are a civilian. Protect the word."}</span></div>}<button className="button-primary" onClick={() => { if (!reveal) { onRevealRole(); setReveal(true); } else { setReveal(false); setReadyTurnKey(turnKey); onPassTurnReady(); } }}>{reveal ? "Hide my role & start turn" : "Tap to reveal my role"} <Eye size={15} /></button></section></div>}
   </div>;
 }
 
@@ -911,15 +1009,25 @@ function RulesDialog({ onClose }: { onClose: () => void }) {
   ].map((rule, i) => <div className="rule-row" key={i}><span className="rule-icon">{rule.icon}</span><span><b>{rule.title}</b><small>{rule.text}</small></span><span className="rule-index">0{i + 1}</span></div>)}</div><button className="button-primary rules-cta" onClick={onClose}>Got it <Check size={16} /></button></>;
 }
 
-function SettingsDialog({ name, setName, onClose }: { name: string; setName: (name: string) => void; onClose: () => void }) {
-  return <><div className="modal-head"><div><span className="modal-kicker">YOUR PLAYER CARD</span><h2>Who’s playing?</h2><p>Your name stays in this browser.</p></div><IconButton title="Close" onClick={onClose}><X size={18} /></IconButton></div><div className="settings-profile"><span>{AVATARS[(name.length || 2) % AVATARS.length]}</span><label className="field"><span>YOUR NICKNAME</span><input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="Enter your nickname" maxLength={20} /></label></div><div className="private-hint"><Shield size={16} /><span>You can join a game as a guest. No account required.</span></div><button className="button-primary settings-save" onClick={onClose}>Save player card <Check size={15} /></button></>;
+function SettingsDialog({ name, avatarUrl, isDiscordUser, discordName, onSave, onClose }: {
+  name: string; avatarUrl?: string; isDiscordUser: boolean; discordName: string; onSave: (name: string) => Promise<boolean>; onClose: () => void;
+}) {
+  const [displayName, setDisplayName] = useState(name);
+  const [saving, setSaving] = useState(false);
+  const save = async () => {
+    setSaving(true);
+    const saved = await onSave(displayName);
+    setSaving(false);
+    if (saved) onClose();
+  };
+  return <><div className="modal-head"><div><span className="modal-kicker">YOUR PLAYER CARD</span><h2>Who’s playing?</h2><p>{isDiscordUser ? "Your Discord account is linked." : "You can join a game as a guest."}</p></div><IconButton title="Close" onClick={onClose}><X size={18} /></IconButton></div><div className="settings-profile"><span className="settings-profile-avatar">{avatarUrl ? <img src={avatarUrl} alt="" referrerPolicy="no-referrer" /> : AVATARS[(displayName.length || 2) % AVATARS.length]}</span><label className="field"><span>GAME DISPLAY NAME</span><input autoFocus value={displayName} onChange={(event) => setDisplayName(event.target.value.slice(0, 32))} placeholder="Enter your display name" maxLength={32} /></label></div>{isDiscordUser && <><div className="private-hint"><Shield size={16} /><span>Discord account: {discordName}. Your custom game name syncs across your devices.</span></div><button type="button" className="text-link settings-reset-name" onClick={() => setDisplayName(discordName)}>Use Discord name</button></>}<button className="button-primary settings-save" disabled={saving || !displayName.trim()} onClick={() => void save()}>{saving ? "Saving…" : "Save player card"} {!saving && <Check size={15} />}</button></>;
 }
 
 function AddPlayerDialog({ onCancel, onAdd }: { onCancel: () => void; onAdd: (name: string) => void }) {
   const [playerName, setPlayerName] = useState("");
   return <form onSubmit={(event) => { event.preventDefault(); onAdd(playerName); }}>
     <div className="modal-head"><div><span className="modal-kicker">PASS THE PHONE</span><h2>Add a player.</h2><p>Give them a name, then hand over the screen.</p></div><IconButton title="Close" onClick={onCancel}><X size={18} /></IconButton></div>
-    <div className="field"><label>PLAYER NICKNAME</label><input autoFocus value={playerName} onChange={(event) => setPlayerName(event.target.value)} placeholder="Enter their name" maxLength={20} /></div>
+    <div className="field"><label>PLAYER NICKNAME</label><input autoFocus value={playerName} onChange={(event) => setPlayerName(event.target.value)} placeholder="Enter their name" maxLength={32} /></div>
     <div className="modal-actions"><button className="button-secondary" type="button" onClick={onCancel}>Cancel</button><button className="button-primary" type="submit" disabled={!playerName.trim()}>Add to lobby <Plus size={15} /></button></div>
   </form>;
 }

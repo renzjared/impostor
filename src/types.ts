@@ -11,6 +11,7 @@ export type Player = {
   id: string;
   name: string;
   avatar: string;
+  avatarUrl?: string;
   ready: boolean;
   alive: boolean;
 };
